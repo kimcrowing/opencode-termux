@@ -8,12 +8,22 @@ OpenCode is an AI-powered coding assistant for the terminal. It uses [Bun](https
 
 ### Option 1: Standalone binary (easiest)
 
+> **Note:** The zip now contains a wrapper script (`opencode`), the main binary
+> (`opencode.bin`), and native libraries (`.so` files). All files must be
+> installed to their proper locations.
+
 ```bash
-# Download and install
-curl -LO https://github.com/guysoft/opencode-termux/releases/latest/download/opencode-aarch64.zip
-unzip opencode-aarch64.zip
-chmod +x opencode
-mv opencode $PREFIX/bin/
+# Download the latest "opencode-*-android-aarch64.zip" from
+#   https://github.com/guysoft/opencode-termux/releases/latest
+# Then install:
+
+mkdir -p $PREFIX/libexec/opencode $PREFIX/lib
+unzip opencode-*-android-aarch64.zip
+mv opencode $PREFIX/bin/opencode
+chmod +x $PREFIX/bin/opencode
+mv opencode.bin $PREFIX/libexec/opencode/opencode.bin
+chmod +x $PREFIX/libexec/opencode/opencode.bin
+mv libtagfix.so libc++_shared.so libopentui.so $PREFIX/lib/
 
 # Install required dependency
 pkg install ripgrep
