@@ -1,8 +1,24 @@
 diff --git a/packages/core/src/zig/build.zig b/packages/core/src/zig/build.zig
-index 9034757..03ee2bd 100644
+index 9034757..4473547 100644
 --- a/packages/core/src/zig/build.zig
 +++ b/packages/core/src/zig/build.zig
-@@ -451,6 +451,29 @@ fn buildTarget(
+@@ -162,8 +162,13 @@ fn addNativeAudioDependencies(
+     switch (target.result.os.tag) {
+         .macos => addMacOSSystemLibraries(b, artifact, macos_sdk_path.?),
+         .linux => {
+-            artifact.linkSystemLibrary("dl");
+-            artifact.linkSystemLibrary("pthread");
++            // Android (linux + android abi) uses bionic libc, which has no
++            // separate libdl/libpthread — they are merged into libc. Linking
++            // them explicitly makes Zig's paths_first search fail. Skip them.
++            if (target.result.abi != .android and target.result.abi != .androideabi) {
++                artifact.linkSystemLibrary("dl");
++                artifact.linkSystemLibrary("pthread");
++            }
+         },
+         else => {},
+     }
+@@ -451,6 +456,29 @@ fn buildTarget(
  
      addNativeAudioDependencies(b, lib, target, macos_sdk_path);
  
