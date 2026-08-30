@@ -1,8 +1,27 @@
 diff --git a/packages/core/src/zig/build.zig b/packages/core/src/zig/build.zig
-index 9034757..4473547 100644
+index 9034757..b6dc54e 100644
 --- a/packages/core/src/zig/build.zig
 +++ b/packages/core/src/zig/build.zig
-@@ -162,8 +162,13 @@ fn addNativeAudioDependencies(
+@@ -125,7 +125,17 @@ fn addMiniaudioShim(
+     };
+ 
+     artifact.addIncludePath(b.path("."));
+-    artifact.linkLibC();
++
++    // Zig 0.15.2 does not ship an Android (bionic) libc, so linkLibC() fails
++    // with "unable to provide libc for target ...android". For Android we
++    // skip linkLibC and instead link the NDK's bionic libc.so/libraries in
++    // buildTarget (where the android-specific block lives).
++    const is_android = target.result.os.tag == .linux and
++        (target.result.abi == .android or target.result.abi == .androideabi);
++    if (!is_android) {
++        artifact.linkLibC();
++    }
++
+     artifact.addCSourceFile(.{
+         .file = b.path("miniaudio_shim.c"),
+         .flags = c_flags,
+@@ -162,8 +172,13 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, artifact, macos_sdk_path.?),
          .linux => {
@@ -18,7 +37,7 @@ index 9034757..4473547 100644
          },
          else => {},
      }
-@@ -451,6 +456,29 @@ fn buildTarget(
+@@ -451,6 +466,29 @@ fn buildTarget(
  
      addNativeAudioDependencies(b, lib, target, macos_sdk_path);
  
