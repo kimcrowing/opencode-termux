@@ -24,23 +24,30 @@ env:
   TINYCC_COMMIT: "b91835d8701523e895a2b447713630069514e291"
   ICU_VERSION: "75.1"
   ZIG_VERSION: "0.15.2"
+  OPENTUI_VERSION: "v0.3.4"
   HOST_BUN_VERSION: "1.3.2"
   # Standard runner: 2 vCPU / 7GB RAM / 14GB SSD.
   # JOBS must be low to avoid OOM during WebKit/Bun compilation.
   JOBS: "1"
-  # Real (non-overlayfs) work area on the runner. Set per-job via $GITHUB_ENV
-  # (runner.temp is not allowed in a top-level env: expression).
+  # One version key for the per-stage build caches. Bumping any source pin
+  # (ICU/WebKit/Bun/opentui) or this file invalidates the matching cache, so a
+  # rerun only rebuilds what actually changed.
+  CACHE_KEY_BASE: ${{ hashFiles('.github/workflows/build.yml') }}
+
+# The heavy, memory-hungry stages (WebKit, Bun) each run in their own job so
+# their RAM peak is isolated on the 2 vCPU runner, and each stage writes its
+# output to an artifact + actions/cache. A failed stage therefore only restarts
+# itself (its upstream outputs are reused), not the whole pipeline.
 
 jobs:
   # ------------------------------------------------------------------
-  # Job 1: heaviest / most memory-hungry step — WebKit/JSC compilation.
-  # Runs alone so its RAM peak is isolated. Produces ICU prefix +
-  # WebKit output, which are handed to job 2 as an artifact.
+  # ICU is fully independent (its own tarball, no Bun/WebKit sources).
+  # Cached so reruns skip it entirely.
   # ------------------------------------------------------------------
-  build-webkit:
-    name: Build ICU + WebKit/JSC
+  build-icu:
+    name: Build ICU
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -51,8 +58,78 @@ jobs:
           WORK_DIR="$RUNNER_TEMP/opencode-build"
           mkdir -p "$WORK_DIR"
           echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
-          echo "Work directory: $WORK_DIR"
-          df -h .
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3 ruby perl git curl wget unzip xz-utils zip build-essential pkg-config
+
+      - name: Install Android NDK r28b (cached)
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: /tmp/android-ndk
+          key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Download Android NDK r28b
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
+          unzip -q ndk.zip -d /tmp/
+          mv /tmp/android-ndk-r28b /tmp/android-ndk
+          rm ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+          echo "/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Set NDK env from cache
+        if: steps.ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+          echo "/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build ICU ${{ env.ICU_VERSION }}
+        run: |
+          source scripts/env.sh
+          ./scripts/build-icu.sh
+
+      - name: Package ICU prefix
+        run: |
+          cd "$WORK_DIR"
+          tar cf icu-prefix.tar deps-android/prefix
+          ls -lh icu-prefix.tar
+
+      - name: Upload ICU prefix
+        uses: actions/upload-artifact@v4
+        with:
+          name: icu-prefix
+          path: ${{ runner.temp }}/opencode-build/icu-prefix.tar
+          if-no-files-found: error
+
+      - name: Cache ICU prefix (fast rerun)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/opencode-build/deps-android/prefix
+          key: icu-${{ env.ICU_VERSION }}-${{ env.CACHE_KEY_BASE }}
+
+  # ------------------------------------------------------------------
+  # Heaviest step: WebKit/JSC. Runs alone so its RAM peak is isolated.
+  # ------------------------------------------------------------------
+  build-webkit:
+    name: Build WebKit/JSC
+    needs: build-icu
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
+          mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
 
       - name: Install system packages
         run: |
@@ -92,7 +169,6 @@ jobs:
       - name: Download Android NDK r28b
         if: steps.ndk.outputs.cache-hit != 'true'
         run: |
-          echo "Downloading Android NDK r28b..."
           cd /tmp
           wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
           unzip -q ndk.zip -d /tmp/
@@ -107,71 +183,58 @@ jobs:
           echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
           echo "/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      - name: Install host Bun (pinned for module graph compatibility)
+      - name: Download ICU prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: icu-prefix
+          path: /tmp/icu
+
+      - name: Extract ICU prefix
         run: |
-          GOT="$(bun --version 2>/dev/null || true)"
-          if [ "$GOT" != "${{ env.HOST_BUN_VERSION }}" ]; then
-            echo "Installing Bun v${{ env.HOST_BUN_VERSION }} (current: ${GOT:-none})..."
-            curl -fsSL https://bun.sh/install | bash -s "bun-v${{ env.HOST_BUN_VERSION }}"
-            echo "$HOME/.bun/bin" >> $GITHUB_PATH
-          fi
-          echo "Host Bun version: $(bun --version)"
-          echo "Target Bun version: ${{ env.BUN_VERSION }}"
+          mkdir -p "$WORK_DIR"
+          tar xf /tmp/icu/icu-prefix.tar -C "$WORK_DIR"
+          source scripts/env.sh
+          test -f "$DEPS_PREFIX/lib/libicuuc.a" && echo "OK: ICU lib exists"
 
       - name: Clone and patch Bun + WebKit
         run: |
           source scripts/env.sh
           ./scripts/apply-patches.sh
 
-      - name: Build ICU 75.1
-        run: |
-          source scripts/env.sh
-          ./scripts/build-icu.sh
-
       - name: Build WebKit/JSC
         run: |
           source scripts/env.sh
           ./scripts/build-webkit.sh
 
-      # Ship only the small built artifacts to the next job. Cache the small
-      # outputs (not the multi-GB source trees) so reruns stay fast and the
-      # 14GB runner SSD never fills.
-      - name: Verify WebKit + ICU output
-        run: |
-          source scripts/env.sh
-          echo "=== WEBKIT_OUTPUT ==="
-          du -sh "$WEBKIT_OUTPUT" 2>/dev/null || true
-          echo "=== ICU prefix ==="
-          du -sh "$DEPS_PREFIX" 2>/dev/null || true
-
-      # Package ICU prefix + WebKit output into a single tar. Using an explicit
-      # tar (relative to WORK_DIR) avoids any ambiguity in how upload-artifact
-      # maps absolute paths that live outside the workspace.
-      - name: Package ICU + WebKit artifacts
+      - name: Package WebKit output
         run: |
           cd "$WORK_DIR"
-          tar cf deps-webkit.tar \
+          tar cf webkit-output.tar \
             deps-android/prefix \
             webkit-android
-          ls -lh deps-webkit.tar
+          ls -lh webkit-output.tar
 
-      - name: Upload ICU + WebKit artifact
+      - name: Upload WebKit output
         uses: actions/upload-artifact@v4
         with:
-          name: deps-webkit
-          path: ${{ env.WORK_DIR }}/deps-webkit.tar
+          name: webkit-output
+          path: ${{ runner.temp }}/opencode-build/webkit-output.tar
           if-no-files-found: error
 
+      - name: Cache WebKit output (fast rerun)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/opencode-build/webkit-android
+          key: webkit-${{ env.WEBKIT_COMMIT }}-${{ env.ICU_VERSION }}-${{ env.CACHE_KEY_BASE }}
+
   # ------------------------------------------------------------------
-  # Job 2: Bun + libopentui + OpenCode + packaging.
-  # Needs the ICU + WebKit artifacts from job 1. Runs alone so its
-  # (lower) RAM peak is also isolated.
+  # opentui .so: only needs NDK + Zig + its own clone. Runs in parallel
+  # with the ICU/WebKit/Bun chain so it is ready for the OpenCode job.
   # ------------------------------------------------------------------
-  build-opencode:
-    name: Build Bun + OpenCode + packages
-    needs: build-webkit
+  build-opentui:
+    name: Build libopentui.so
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -182,8 +245,89 @@ jobs:
           WORK_DIR="$RUNNER_TEMP/opencode-build"
           mkdir -p "$WORK_DIR"
           echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
-          echo "Work directory: $WORK_DIR"
-          df -h .
+
+      - name: Install Android NDK r28b (cached)
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: /tmp/android-ndk
+          key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Download Android NDK r28b
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
+          unzip -q ndk.zip -d /tmp/
+          mv /tmp/android-ndk-r28b /tmp/android-ndk
+          rm ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Set NDK env from cache
+        if: steps.ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Verify NDK libc stub exists
+        run: |
+          API="$ANDROID_API"
+          LIBC="/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}/libc.so"
+          ls -la "$LIBC" && echo "OK: NDK libc stub present" || { echo "ERROR: NDK libc stub missing"; exit 1; }
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          ZIG_DIR="$RUNNER_TEMP/opencode-build/zig-${{ env.ZIG_VERSION }}"
+          if [ -x "$ZIG_DIR/zig" ]; then
+            echo "Zig already at $ZIG_DIR"
+          else
+            echo "Downloading Zig ${{ env.ZIG_VERSION }}..."
+            cd /tmp
+            wget -q "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" -O zig.tar.xz
+            mkdir -p "$ZIG_DIR"
+            tar xf zig.tar.xz -C "$ZIG_DIR" --strip-components=1
+            rm zig.tar.xz
+          fi
+          echo "ZIG_BIN=$ZIG_DIR/zig" >> $GITHUB_ENV
+          echo "$ZIG_DIR" >> $GITHUB_PATH
+
+      - name: Build libopentui.so
+        run: |
+          source scripts/env.sh
+          ./scripts/build-opentui.sh
+
+      - name: Package libopentui.so
+        run: |
+          source scripts/env.sh
+          mkdir -p "$RUNNER_TEMP/opentui-artifact"
+          cp "$OPENTUI_SRC/packages/core/src/lib/aarch64-linux-android/libopentui.so" \
+             "$RUNNER_TEMP/opentui-artifact/"
+
+      - name: Upload libopentui.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libopentui
+          path: ${{ runner.temp }}/opentui-artifact/libopentui.so
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Bun + TinyCC. Second heaviest. JOBS=1. TinyCC writes libtcc.a into
+  # webkit-android (where Bun's CMake expects it) before Bun builds.
+  # ------------------------------------------------------------------
+  build-bun:
+    name: Build TinyCC + Bun
+    needs: build-webkit
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
+          mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
 
       - name: Install system packages
         run: |
@@ -206,7 +350,6 @@ jobs:
       - name: Download Android NDK r28b
         if: steps.ndk.outputs.cache-hit != 'true'
         run: |
-          echo "Downloading Android NDK r28b..."
           cd /tmp
           wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
           unzip -q ndk.zip -d /tmp/
@@ -258,25 +401,21 @@ jobs:
           echo "ZIG_BIN=$ZIG_DIR/zig" >> $GITHUB_ENV
           echo "$ZIG_DIR" >> $GITHUB_PATH
 
-      - name: Download ICU + WebKit artifacts from job 1
+      - name: Download WebKit output
         uses: actions/download-artifact@v4
         with:
-          name: deps-webkit
-          path: /tmp/deps-webkit
+          name: webkit-output
+          path: /tmp/webkit
 
-      - name: Extract ICU + WebKit artifacts
+      - name: Extract WebKit output
         run: |
           mkdir -p "$WORK_DIR"
-          tar xf /tmp/deps-webkit/deps-webkit.tar -C "$WORK_DIR"
+          tar xf /tmp/webkit/webkit-output.tar -C "$WORK_DIR"
           source scripts/env.sh
-          echo "WEBKIT_OUTPUT:"; du -sh "$WEBKIT_OUTPUT"
-          echo "DEPS_PREFIX:"; du -sh "$DEPS_PREFIX"
           test -d "$WEBKIT_OUTPUT/lib" && echo "OK: WebKit lib exists"
           test -f "$DEPS_PREFIX/lib/libicuuc.a" && echo "OK: ICU lib exists"
 
-      # The Bun source tree is NOT shipped over; clone + patch it here so the
-      # artifact stays small and Bun's own Zig download happens in this job.
-      - name: Clone and patch Bun
+      - name: Clone and patch Bun + WebKit
         run: |
           source scripts/env.sh
           ./scripts/apply-patches.sh
@@ -293,16 +432,89 @@ jobs:
 
       - name: Verify Bun binary
         run: |
-          BUN_BINARY="${WORK_DIR}/bun-build/bun"
-          echo "Bun binary: $BUN_BINARY"
-          ls -lh "$BUN_BINARY"
-          file "$BUN_BINARY" || true
-          readelf -h "$BUN_BINARY" | grep -E "Machine|Class" || true
+          source scripts/env.sh
+          echo "Bun binary: $BUN_BUILD/bun"
+          ls -lh "$BUN_BUILD/bun"
+          file "$BUN_BUILD/bun" || true
+          readelf -h "$BUN_BUILD/bun" | grep -E "Machine|Class" || true
 
-      - name: Build libopentui.so
+      - name: Package Bun binary
         run: |
           source scripts/env.sh
-          ./scripts/build-opentui.sh
+          mkdir -p "$RUNNER_TEMP/bunbin-artifact"
+          cp "$BUN_BUILD/bun" "$RUNNER_TEMP/bunbin-artifact/bun"
+
+      - name: Upload Bun binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-bin
+          path: ${{ runner.temp }}/bunbin-artifact/bun
+          if-no-files-found: error
+
+      - name: Cache Bun build dir (fast rerun)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/opencode-build/bun-build
+          key: bun-${{ env.BUN_VERSION }}-${{ env.WEBKIT_COMMIT }}-${{ env.CACHE_KEY_BASE }}
+
+  # ------------------------------------------------------------------
+  # Assemble OpenCode: bundle with host Bun, swap in aarch64 libopentui.so.
+  # ------------------------------------------------------------------
+  build-opencode:
+    name: Build OpenCode binary
+    needs: [build-bun, build-opentui]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
+          mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl wget unzip xz-utils zip build-essential pkg-config
+
+      - name: Install host Bun (pinned for module graph compatibility)
+        run: |
+          GOT="$(bun --version 2>/dev/null || true)"
+          if [ "$GOT" != "${{ env.HOST_BUN_VERSION }}" ]; then
+            echo "Installing Bun v${{ env.HOST_BUN_VERSION }} (current: ${GOT:-none})..."
+            curl -fsSL https://bun.sh/install | bash -s "bun-v${{ env.HOST_BUN_VERSION }}"
+            echo "$HOME/.bun/bin" >> $GITHUB_PATH
+          fi
+          echo "Host Bun version: $(bun --version)"
+
+      - name: Download Bun binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bun-bin
+          path: /tmp/bun
+
+      - name: Download libopentui
+        uses: actions/download-artifact@v4
+        with:
+          name: libopentui
+          path: /tmp/opentui
+
+      - name: Stage Android bun + libopentui
+        run: |
+          source scripts/env.sh
+          mkdir -p "$BUN_BUILD"
+          cp /tmp/bun/bun "$BUN_BUILD/bun"
+          chmod +x "$BUN_BUILD/bun"
+          LIBOPENTUI_DIR="$OPENTUI_SRC/packages/core/src/lib/aarch64-linux-android"
+          mkdir -p "$LIBOPENTUI_DIR"
+          cp /tmp/opentui/libopentui.so "$LIBOPENTUI_DIR/libopentui.so"
+          echo "staged:"
+          ls -la "$BUN_BUILD/bun" "$LIBOPENTUI_DIR/libopentui.so"
+          test -x "$BUN_BUILD/bun" && echo "OK: Android bun staged"
 
       - name: Build OpenCode standalone binary
         run: |
@@ -311,11 +523,91 @@ jobs:
 
       - name: Verify OpenCode binary
         run: |
-          OPENCODE_BINARY="${WORK_DIR}/dist/opencode"
-          echo "OpenCode binary: $OPENCODE_BINARY"
-          ls -lh "$OPENCODE_BINARY"
-          file "$OPENCODE_BINARY" || true
-          readelf -h "$OPENCODE_BINARY" | grep -E "Machine|Class" || true
+          source scripts/env.sh
+          echo "OpenCode binary: $DIST_DIR/opencode"
+          ls -lh "$DIST_DIR/opencode"
+          file "$DIST_DIR/opencode" || true
+          readelf -h "$DIST_DIR/opencode" | grep -E "Machine|Class" || true
+
+      # Stage everything the packaging job needs under one dir so it can be
+      # handed over as a single artifact.
+      - name: Stage dist output
+        run: |
+          source scripts/env.sh
+          STAGE="$RUNNER_TEMP/dist-stage"
+          mkdir -p "$STAGE"
+          cp "$DIST_DIR/opencode" "$STAGE/opencode"
+          cp "$OPENTUI_SRC/packages/core/src/lib/aarch64-linux-android/libopentui.so" "$STAGE/libopentui.so"
+          ls -lh "$STAGE"
+
+      - name: Upload dist stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-stage
+          path: ${{ runner.temp }}/dist-stage/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Packaging + release. Only needs the OpenCode binary + libopentui.so;
+  # the repo checkout supplies the wrapper script.
+  # ------------------------------------------------------------------
+  make-packages:
+    name: Create packages + release
+    needs: build-opencode
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
+          mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git unzip zip xz-utils
+
+      - name: Install Android NDK r28b (cached, for libc++_shared.so)
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: /tmp/android-ndk
+          key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Download Android NDK r28b
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
+          unzip -q ndk.zip -d /tmp/
+          mv /tmp/android-ndk-r28b /tmp/android-ndk
+          rm ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Set NDK env from cache
+        if: steps.ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Download dist stage
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-stage
+          path: /tmp/dist
+
+      - name: Place binary + libopentui.so into dist dir
+        run: |
+          source scripts/env.sh
+          echo "DIST_DIR=$DIST_DIR (WORK_DIR=$WORK_DIR)"
+          mkdir -p "$DIST_DIR"
+          cp /tmp/dist/opencode "$DIST_DIR/opencode"
+          cp /tmp/dist/libopentui.so "$DIST_DIR/libopentui.so"
+          ls -lh "$DIST_DIR"
 
       - name: Create distribution packages
         run: |
@@ -324,6 +616,7 @@ jobs:
 
       - name: List packages
         run: |
+          source scripts/env.sh
           echo "=== Built packages ==="
           ls -lh "${WORK_DIR}/packages/"
 
@@ -332,18 +625,18 @@ jobs:
         with:
           name: opencode-termux-${{ env.OPENCODE_VERSION }}
           path: |
-            ${{ env.WORK_DIR }}/packages/*.zip
-            ${{ env.WORK_DIR }}/packages/*.pkg.tar.xz
-            ${{ env.WORK_DIR }}/packages/*.deb
+            ${{ runner.temp }}/opencode-build/packages/*.zip
+            ${{ runner.temp }}/opencode-build/packages/*.pkg.tar.xz
+            ${{ runner.temp }}/opencode-build/packages/*.deb
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ${{ env.WORK_DIR }}/packages/*.zip
-            ${{ env.WORK_DIR }}/packages/*.pkg.tar.xz
-            ${{ env.WORK_DIR }}/packages/*.deb
+            ${{ runner.temp }}/opencode-build/packages/*.zip
+            ${{ runner.temp }}/opencode-build/packages/*.pkg.tar.xz
+            ${{ runner.temp }}/opencode-build/packages/*.deb
           body: |
             ## OpenCode ${{ env.OPENCODE_VERSION }} for Android/Termux (aarch64)
 
