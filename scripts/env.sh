@@ -14,6 +14,10 @@ export WEBKIT_COMMIT="${WEBKIT_COMMIT:-017930ebf915121f8f593bef61cbbca82d78132d}
 export ICU_VERSION="${ICU_VERSION:-75.1}"
 export ZIG_VERSION="${ZIG_VERSION:-0.15.2}"
 export OPENCODE_VERSION="${OPENCODE_VERSION:-1.3.13}"
+# @opentui/core version bundled by the pinned OPENCODE_VERSION. The opentui
+# repo restructured after 0.3.4 (zig moved to packages/native, Zig 0.16), so we
+# must stay on the tag that matches the OpenCode release being built.
+export OPENTUI_VERSION="${OPENTUI_VERSION:-v0.3.4}"
 export ANDROID_API="${ANDROID_API:-24}"
 
 # Android NDK
