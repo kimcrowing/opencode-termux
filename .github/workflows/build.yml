@@ -28,8 +28,8 @@ env:
   # Standard runner: 2 vCPU / 7GB RAM / 14GB SSD.
   # JOBS must be low to avoid OOM during WebKit/Bun compilation.
   JOBS: "1"
-  # Real (non-overlayfs) work area on the runner.
-  WORK_DIR: "${{ runner.temp }}/opencode-build"
+  # Real (non-overlayfs) work area on the runner. Set per-job via $GITHUB_ENV
+  # (runner.temp is not allowed in a top-level env: expression).
 
 jobs:
   # ------------------------------------------------------------------
@@ -48,7 +48,9 @@ jobs:
 
       - name: Create work directory
         run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
           mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
           echo "Work directory: $WORK_DIR"
           df -h .
 
@@ -177,7 +179,9 @@ jobs:
 
       - name: Create work directory
         run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
           mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
           echo "Work directory: $WORK_DIR"
           df -h .
 
