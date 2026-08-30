@@ -1,0 +1,96 @@
+name: Test libopentui.so (fast)
+
+on:
+  workflow_dispatch:
+    inputs:
+      opentui_version:
+        description: 'opentui tag to test (must match the OpenCode release)'
+        required: false
+        default: 'v0.3.4'
+
+concurrency:
+  group: test-opentui
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.15.2"
+  ANDROID_API: "24"
+  ANDROID_NDK_VERSION: "28.1.13356709"
+  OPENTUI_VERSION: "v0.3.4"
+
+jobs:
+  test-opentui:
+    name: Build libopentui.so for aarch64-linux-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          WORK_DIR="$RUNNER_TEMP/opencode-build"
+          mkdir -p "$WORK_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
+          echo "Work directory: $WORK_DIR"
+
+      - name: Install Android NDK r28b (cached)
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: /tmp/android-ndk
+          key: android-ndk-test-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Download Android NDK r28b
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          echo "Downloading Android NDK r28b..."
+          cd /tmp
+          wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
+          unzip -q ndk.zip -d /tmp/
+          mv /tmp/android-ndk-r28b /tmp/android-ndk
+          rm ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Set NDK env from cache
+        if: steps.ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
+
+      - name: Verify NDK libc stub exists
+        run: |
+          API="$ANDROID_API"
+          LIBC="/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${API}/libc.so"
+          ls -la "$LIBC" && echo "OK: NDK libc stub present" || { echo "ERROR: NDK libc stub missing"; exit 1; }
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          ZIG_DIR="$WORK_DIR/zig-${{ env.ZIG_VERSION }}"
+          if [ -x "$ZIG_DIR/zig" ]; then
+            echo "Zig already at $ZIG_DIR"
+          else
+            echo "Downloading Zig ${{ env.ZIG_VERSION }}..."
+            cd /tmp
+            wget -q "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" -O zig.tar.xz
+            mkdir -p "$ZIG_DIR"
+            tar xf zig.tar.xz -C "$ZIG_DIR" --strip-components=1
+            rm zig.tar.xz
+          fi
+          echo "ZIG_BIN=$ZIG_DIR/zig" >> $GITHUB_ENV
+          echo "$ZIG_DIR" >> $GITHUB_PATH
+
+      - name: Build libopentui.so
+        run: |
+          source scripts/env.sh
+          ./scripts/build-opentui.sh
+
+      - name: Verify output
+        run: |
+          source scripts/env.sh
+          LIB=$(find "$OPENTUI_SRC" -name "libopentui.so" -type f | head -1)
+          echo "Found: $LIB"
+          file "$LIB" || true
+          echo "=== NEEDED libraries ==="
+          readelf -d "$LIB" | grep NEEDED || true
+          echo "=== OK if libc.so is in NEEDED and ELF is aarch64 ==="
