@@ -29,10 +29,10 @@ env:
   # Standard runner: 2 vCPU / 7GB RAM / 14GB SSD.
   # JOBS must be low to avoid OOM during WebKit/Bun compilation.
   JOBS: "1"
-  # One version key for the per-stage build caches. Bumping any source pin
-  # (ICU/WebKit/Bun/opentui) or this file invalidates the matching cache, so a
-  # rerun only rebuilds what actually changed.
-  CACHE_KEY_BASE: ${{ hashFiles('.github/workflows/build.yml') }}
+  # NOTE: top-level env: does not allow expressions/functions (hashFiles,
+  # runner.temp, ...). Per-stage cache keys below inline
+  # hashFiles('.github/workflows/build.yml') so editing this file invalidates
+  # the caches and only the changed stages rebuild.
 
 # The heavy, memory-hungry stages (WebKit, Bun) each run in their own job so
 # their RAM peak is isolated on the 2 vCPU runner, and each stage writes its
@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/deps-android/prefix
-          key: icu-${{ env.ICU_VERSION }}-${{ env.CACHE_KEY_BASE }}
+          key: icu-${{ env.ICU_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
 
   # ------------------------------------------------------------------
   # Heaviest step: WebKit/JSC. Runs alone so its RAM peak is isolated.
@@ -225,7 +225,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/webkit-android
-          key: webkit-${{ env.WEBKIT_COMMIT }}-${{ env.ICU_VERSION }}-${{ env.CACHE_KEY_BASE }}
+          key: webkit-${{ env.WEBKIT_COMMIT }}-${{ env.ICU_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
 
   # ------------------------------------------------------------------
   # opentui .so: only needs NDK + Zig + its own clone. Runs in parallel
@@ -455,7 +455,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/bun-build
-          key: bun-${{ env.BUN_VERSION }}-${{ env.WEBKIT_COMMIT }}-${{ env.CACHE_KEY_BASE }}
+          key: bun-${{ env.BUN_VERSION }}-${{ env.WEBKIT_COMMIT }}-${{ hashFiles('.github/workflows/build.yml') }}
 
   # ------------------------------------------------------------------
   # Assemble OpenCode: bundle with host Bun, swap in aarch64 libopentui.so.
