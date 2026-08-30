@@ -3,13 +3,14 @@
 ## 一、源码信息
 
 ### 安装来源
-- **仓库**：https://github.com/guysoft/opencode-termux
+- **构建仓库**：本仓库 `kimcrowing/opencode-termux`（独立构建系统）
+- **应用源码**：https://github.com/anomalyco/opencode
 - **Release**：v0.2.1（对应 OpenCode 1.17.9 Android/Termux aarch64）
 - **发布日期**：2026-06-25
 - **验证**：`~/.opencode/.opencode-termux-version` 内容为 `1.17.9`
 
-### 该仓库的性质
-guysoft/opencode-termux 是**构建/打包仓库**（不是 opencode 应用源码仓库），它做的事：
+### 本仓库的性质
+本仓库是**构建/打包仓库**（不是 opencode 应用源码仓库），它做的事：
 1. 把 Bun + WebKit/JSC 交叉编译到 Android aarch64
 2. 用这份 Bun 编译官方 opencode（源码来自 `anomalyco/opencode`）
 3. 加 Android 兼容修复（libtagfix.so / libopentui.so / wrapper 脚本）
@@ -18,7 +19,7 @@ guysoft/opencode-termux 是**构建/打包仓库**（不是 opencode 应用源�
 | 想找的内容 | 去哪个仓库 |
 |-----------|-----------|
 | opencode 应用逻辑（TS） | https://github.com/anomalyco/opencode |
-| Android 移植/构建（wrapper、libtagfix、交叉编译配置） | https://github.com/guysoft/opencode-termux |
+| Android 移植/构建（wrapper、libtagfix、交叉编译配置） | 本仓库 |
 
 ### 构建信息（v0.2.1）
 | 项目 | 版本 |
@@ -84,7 +85,7 @@ static void syscall_sigsys_handler(int signo, siginfo_t *info, void *context) {
 
 ### 补丁 2：wrapper 注入 shim
 
-**文件**：`~/.opencode/opencode`（guysoft 的启动 wrapper，3.4KB shell 脚本）
+**文件**：`~/.opencode/opencode`（启动 wrapper，3.4KB shell 脚本）
 
 **改动**（第 43 行）：
 ```diff
@@ -92,9 +93,10 @@ static void syscall_sigsys_handler(int signo, siginfo_t *info, void *context) {
 +    export LD_PRELOAD="${NATIVE_LIB_DIR}/libtagfix.so:${NATIVE_LIB_DIR}/libseccomp_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
 ```
 
-**说明**：guysoft 原本只 preload `libtagfix.so`（解决 heap tagging SIGABRT），
+**说明**：早期方案原本只 preload `libtagfix.so`（解决 heap tagging SIGABRT），
 追加 `libseccomp_shim.so` 后，同时解决 SIGSYS 崩溃。两个库互不冲突
-（一个处理 heap tag，一个处理 seccomp）。
+（一个处理 heap tag，一个处理 seccomp）。本仓库构建已把这两个库**内置**到
+产物中并自动 preload，因此采用本仓库构建时无需手动打此补丁。
 
 **备份**：`~/.opencode/opencode.bak2`（改前原版）
 
@@ -126,7 +128,7 @@ exec opencode serve --hostname 0.0.0.0 --port 4096
 | `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` | 禁用 `epoll_pwait2`(syscall 441)，避免 Bun 事件循环在 Android 上 fault | Bun PR #32490 的 escape hatch |
 
 **注意**：`BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2` 是 Bun 1.4.0+ 引入的，
-当前 guysoft 用 Bun 1.2.13 可能不识别此变量（无害，但未必生效）。
+早期构建用的 Bun 1.2.13 可能不识别此变量（无害，但未必生效）。
 真正起保护作用的是补丁 1 的 seccomp shim。
 
 ---
@@ -250,7 +252,8 @@ npm install -g firecrawl-mcp scholar-mcp @browserless.io/mcp
 1. **`OPENCODE_SERVER_PASSWORD=www` 实际未生效**
    - 日志仍显示 "password not set; server is unsecured"
    - 无密码/错密码/对密码访问均返回 200，basic auth 未启用
-   - 疑似 guysoft 1.17.9 构建的 bug，局域网内影响不大
+   - 疑似 1.17.9 构建的 bug，局域网内影响不大
+   - 本仓库构建已通过 `/proc/self/environ` 恢复 `process.env` 修复（见补丁 10）
 
 2. **`node` 权限被改回 700**
    - 目前不影响（MCP 走 node 绝对路径），但用 npx 时可能重现问题
