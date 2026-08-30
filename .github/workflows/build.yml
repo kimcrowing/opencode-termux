@@ -231,6 +231,17 @@ jobs:
           fi
           echo "Host Bun version: $(bun --version)"
 
+      - name: Install Rust Android target (for Bun's lolhtml)
+        run: |
+          if command -v rustup >/dev/null 2>&1; then
+            rustup target add aarch64-linux-android
+          else
+            echo "rustup not found; installing via apt"
+            sudo apt-get install -y rustc cargo
+            rustup target add aarch64-linux-android 2>/dev/null || true
+          fi
+          echo "Rust targets: $(rustup target list --installed 2>/dev/null | tr '\n' ' ')"
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           ZIG_DIR="$WORK_DIR/zig-${{ env.ZIG_VERSION }}"
