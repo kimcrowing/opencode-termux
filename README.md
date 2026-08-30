@@ -1,29 +1,46 @@
-# OpenCode for Termux (Android aarch64)
+# OpenCode for Termux (Android 10+ Compatible Build)
 
 Build system for cross-compiling [OpenCode](https://github.com/anomalyco/opencode) to run natively on Android devices via [Termux](https://termux.dev/).
 
-OpenCode is an AI-powered coding assistant for the terminal. It uses [Bun](https://bun.sh/) as its JavaScript runtime and compiles to a standalone binary via `bun build --compile`. Since Bun has no official Android support ([marked "not planned"](https://github.com/oven-sh/bun/issues/9)), this project cross-compiles Bun itself from source for Android/aarch64, including the full WebKit/JavaScriptCore engine.
+This repository provides an **independent, automated build system** that cross-compiles OpenCode for Android aarch64 with **Android 10 compatibility fixes** built in. Builds run automatically on GitHub-hosted runners.
 
-## Install (Termux)
+On **Android 10 (API 29)** and similar older versions, upstream builds (which target newer Android versions) start but die after 30-120 seconds with:
 
-### Option 1: Standalone binary (easiest)
+```
+Fatal signal 31 (SIGSYS), code 1 (SYS_SECCOMP)
+Cause: seccomp prevented call to disallowed arm64 system call 291 (openat2)
+Cause: seccomp prevented call to disallowed arm64 system call 434 (pidfd_open)
+```
 
-> **Note:** The zip now contains a wrapper script (`opencode`), the main binary
-> (`opencode.bin`), and native libraries (`.so` files). All files must be
-> installed to their proper locations.
+Android 10's per-app seccomp allow-list predates these syscalls, so the kernel sends SIGSYS instead of returning ENOSYS. Bun's errno-based fallbacks never get a chance to run.
+
+This build **integrates the fixes at compile time** so the published binaries run on Android 10+ out of the box.
+
+## What This Build Fixes
+
+| Issue | Solution |
+|-------|----------|
+| **SIGSYS crashes (Android 10)** | `libseccomp_shim.so` converts seccomp SIGSYS kills into ENOSYS returns, letting Bun's fallback paths work |
+| **SIGABRT on Android 11+** | `libtagfix.so` disables bionic heap pointer tagging that breaks Bun/JSC's NaN-boxing |
+| **MCP server crashes** | `npx` shebang fixed; MCP servers now use absolute `node` path |
+| **Bun process.env on Android** | Wrapper restores `process.env` from `/proc/self/environ` at startup |
+| **Bun epoll_pwait2 issue** | `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` disables problematic syscall |
+
+## Installation
+
+### Option 1: Standalone Binary (Recommended)
+
+Download the latest release from [releases](https://github.com/kimcrowing/opencode-termux/releases):
 
 ```bash
-# Download the latest "opencode-*-android-aarch64.zip" from
-#   https://github.com/guysoft/opencode-termux/releases/latest
-# Then install:
-
+# Download and install
 mkdir -p $PREFIX/libexec/opencode $PREFIX/lib
 unzip opencode-*-android-aarch64.zip
 mv opencode $PREFIX/bin/opencode
 chmod +x $PREFIX/bin/opencode
 mv opencode.bin $PREFIX/libexec/opencode/opencode.bin
 chmod +x $PREFIX/libexec/opencode/opencode.bin
-mv libtagfix.so libc++_shared.so libopentui.so $PREFIX/lib/
+mv libtagfix.so libc++_shared.so libopentui.so libseccomp_shim.so $PREFIX/lib/
 
 # Install required dependency
 pkg install ripgrep
@@ -32,506 +49,98 @@ pkg install ripgrep
 opencode
 ```
 
-### Option 2: Pacman package (recommended if using pacman)
+### Option 2: Pacman Package (Termux)
 
 ```bash
-curl -LO https://github.com/guysoft/opencode-termux/releases/latest/download/opencode-aarch64.pkg.tar.xz
+curl -LO https://github.com/kimcrowing/opencode-termux/releases/latest/download/opencode-aarch64.pkg.tar.xz
 pacman -U opencode-*-aarch64.pkg.tar.xz
 opencode
 ```
 
-### Option 3: Deb package
+### Option 3: Deb Package
 
 ```bash
-curl -LO https://github.com/guysoft/opencode-termux/releases/latest/download/opencode-aarch64.deb
-dpkg -i opencode-*-aarch64.deb
+curl -LO https://github.com/kimcrowing/opencode-termux/releases/latest/download/opencode-aarch64.deb
+dpkg -i opencode-*.deb
 opencode
 ```
 
-The pacman and deb packages automatically install `ripgrep` as a dependency.
+## What's Included in Each Package
 
-### After install
+Every package contains:
+- `opencode` — wrapper script (preloads compat libraries)
+- `opencode.bin` — standalone Bun binary
+- `libtagfix.so` — disables bionic heap pointer tagging (Android 11+)
+- `libseccomp_shim.so` — seccomp SIGSYS shim for Android 10
+- `libopentui.so` — OpenTUI renderer (ARM64 Android build)
+- `libc++_shared.so` — C++ standard library (required by Bun JIT)
 
-OpenCode needs an AI provider to work. Set one up by configuring your environment:
+## Configuration
+
+Set your AI provider API key:
 
 ```bash
-# Example: Use Anthropic Claude
+# Anthropic Claude
 export ANTHROPIC_API_KEY="sk-..."
 
-# Or use OpenAI
+# Or OpenAI
 export OPENAI_API_KEY="sk-..."
 
 # Then run
 opencode
 ```
 
-See the [OpenCode docs](https://github.com/anomalyco/opencode) for full configuration options.
+## What's Fixed vs Upstream
 
-## What This Repo Contains
+| Issue | Upstream | This Build |
+|-------|----------|-----------|
+| Android 10 SIGSYS crashes | ❌ Crashes | ✅ Fixed (seccomp shim) |
+| Android 11+ heap tagging SIGABRT | ❌ Crashes | ✅ Fixed (libtagfix) |
+| `list_documents` tool | ❌ Connection closed | ✅ Works (waf bypass) |
+| `OPENCODE_SERVER_PASSWORD` | ❌ Ignored | ✅ Fixed (process.env restore) |
+| MCP via `npx` | ❌ Connection closed | ✅ Use absolute `node` path |
+| `epoll_pwait2` crash | ❌ Crashes | `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` |
 
-This repo contains **patch files and build scripts** only -- not the full source trees of Bun or WebKit (which are 1.1GB and 2.7GB respectively). The CI workflow clones upstream repos and applies patches during build.
+## Building From Source
 
-```
-opencode-termux/
-  patches/
-    bun/android-support.patch      # 33 files, Bun Android/aarch64 support
-    webkit/android-support.patch   # 5 files, WebKit/JSC Android fixes
-    zig/posix-android-sigaction.patch  # Zig stdlib sigaction/sigprocmask fix
-    opentui/android-libc-link.patch  # Link NDK libc.so for Android dlopen
-  scripts/
-    apply-patches.sh               # Clone upstream repos + apply patches
-    build-icu.sh                   # Cross-compile ICU 75.1 for Android
-    build-webkit.sh                # Cross-compile WebKit/JSC for Android
-    build-tinycc.sh                # Cross-compile TinyCC (libtcc.a) for Android
-    build-bun.sh                   # Cross-compile Bun for Android
-    build-opentui.sh               # Build libopentui.so for Android
-    build-opencode.sh              # Build OpenCode standalone binary
-    make-packages.sh               # Create zip, pacman, and deb packages
-    build-opencode-android.ts      # TypeScript helper (module graph extraction)
-  cmake/
-    webkit-android-toolchain.cmake # WebKit CMake cross-compilation toolchain
-  .github/workflows/
-    build.yml                      # GitHub Actions CI workflow
+```bash
+# Prerequisites: Android NDK r28+, Bun host binary
+git clone https://github.com/kimcrowing/opencode-termux
+cd opencode-termux
+./scripts/apply-patches.sh      # Apply patches to Bun/WebKit/Zig
+./scripts/build-bun.sh          # Build Android Bun
+./scripts/build-opentui.sh      # Build libopentui.so
+./scripts/build-opencode.sh     # Build opencode binary
+./scripts/make-packages.sh      # Create all package formats
 ```
 
----
-
-## What Was Done
-
-This project got OpenCode (a ~136MB standalone binary built on Bun + WebKit/JSC) running on Android/Termux, which required:
-
-1. **Cross-compiling Bun v1.2.13 for Android/aarch64** -- Bun has zero Android support. We patched 33 files across the build system (CMake, Zig), syscall layer, Bionic libc compatibility, JSC/JIT configuration, and linker settings.
-
-2. **Cross-compiling WebKit/JavaScriptCore for Android** -- No prebuilt WebKit exists for Android. We patched 5 files to replace glibc-specific APIs with POSIX/Android equivalents and fixed JIT signal handling for Android's security model.
-
-3. **Fixing Zig's stdlib for Android/Bionic** -- Zig's `sigaction()` and `sigprocmask()` pass a 152-byte struct through Bionic's libc which expects 32 bytes, causing silent memory corruption. Patched to use raw syscalls on Android.
-
-4. **Building libopentui.so for Android** -- OpenCode's TUI renderer depends on OpenTUI, which needed a patch to link Android NDK's libc.so stub so `dlopen()` can resolve symbols at runtime.
-
-5. **Standalone binary surgery** -- Since `bun build --compile` has no Android cross-compilation target, we build a host standalone binary, extract the serialized module graph, and transplant it onto the Android Bun binary. This required understanding and matching the binary format across Bun versions (36-byte vs 52-byte module struct stride).
-
-6. **Cross-compiling ICU 75.1** -- Bun depends on ICU for Unicode/i18n support. Cross-compiled from source for Android.
-
-7. **Cross-compiling TinyCC** -- Bun links against libtcc.a for FFI support. TinyCC's build system assumes a host build, so we cross-compile it separately and inject the library.
-
-### Build pipeline
-
-```
-Stage 1: ICU 75.1          ~5 min    (cross-compile for Android)
-Stage 2: WebKit/JSC        ~60-90 min (cross-compile, CACHED)
-Stage 3: TinyCC            ~1 min    (cross-compile libtcc.a)
-Stage 4: Bun binary        ~30-45 min (CMake + Ninja, CACHED)
-Stage 5: libopentui.so     ~2 min    (Zig build for aarch64-linux-android)
-Stage 6: OpenCode bundle   ~30 sec   (bun build --compile, extract module graph)
-Stage 7: Packages          ~10 sec   (zip + pacman + deb)
-```
-
-With warm caches (WebKit + Bun cached), CI runs complete in ~4 minutes.
-
----
-
-## What Was Patched and Why
-
-### Bun Patches (33 files modified, 2 new files)
-
-Bun has zero Android support. Every patch falls into one of these categories:
-
-#### Build system (CMake/Zig)
-- **Android NDK CMake toolchain** (`cmake/toolchains/android-aarch64.cmake`) -- new file. Sets up cross-compiler, sysroot, and find-root paths for the entire Bun build.
-- **`-fPIC` instead of `-fno-pic`** -- Android requires position-independent code for all executables and shared libraries (since API 21).
-- **PIE linking** -- Android mandates position-independent executables. Changed `-Wl,-no-pie` to `-pie -fPIE`.
-- **Rust linker set to NDK's versioned clang** -- The lol-html Rust crate must link against Android's libc, not the host's. Set `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` to the NDK's `aarch64-linux-android24-clang`.
-- **Zig `translate-c` given NDK sysroot headers** -- Zig has no bundled Android libc headers. Added `-Dandroid-ndk-sysroot` build option that passes NDK include paths to `translate-c`.
-- **`-Wno-undefined-var-template`** added -- NDK Clang 19 triggers this warning on some JSC template specializations; with `-Werror`, this becomes a build failure.
-- **RELRO kept enabled** -- Desktop Linux disables RELRO (`-Wl,-z,norelro`); Android requires it for security.
-- **`CARGO_ENCODED_RUSTFLAGS` replaced with `RUSTFLAGS`** -- CMake can't encode the 0x1F separator that `CARGO_ENCODED_RUSTFLAGS` requires. Switched to space-separated `RUSTFLAGS`.
-
-#### TLS alignment (ARM64 Bionic critical fix)
-- **`android_tls_align.s`** -- new file. Assembly file that creates a `.tbss` section with 64-byte alignment. Without this, the Zig linker emits `PT_TLS p_align=8`, causing TLS variables to overlap with Bionic's Thread Control Block slots (TPIDR+0..63), corrupting scudo allocator state and crashing on first allocation. This MUST be assembled (not compiled as C) to avoid NDK's emulated TLS (`__emutls`).
-- **`android_tls_align.c`** -- backup C version with `__attribute__((aligned(64)))`.
-
-#### Syscall compatibility
-- **`close_range()` fallback** -- Android's seccomp filter blocks the `close_range` syscall in app processes (including Termux). Replaced with iteration over `/proc/self/fd`.
-- **`preadv2`/`pwritev2` return ENOSYS** -- These syscalls may be blocked by Android's seccomp. Return ENOSYS so the Zig caller falls back to regular `read()`/`write()`.
-- **`epoll_pwait2` return ENOSYS** -- Same seccomp issue. Falls back to `epoll_pwait`.
-- **`lchmod` return ENOSYS** -- Not available in Bionic.
-
-#### Bionic libc differences
-- **`memmem`, `lstat`, `fstat`, `stat` as `@extern` declarations** -- Bionic has these symbols but Zig's `translate-c` doesn't pick them up due to symbol visibility differences. Declared manually.
-- **`getifaddrs`/`freeifaddrs` extern wrappers** -- Hidden by `__INTRODUCED_IN` macros at API 24 despite being available. Declared manually via `@extern`.
-- **`pthread_setcancelstate` stubbed** -- Bionic has no POSIX thread cancellation.
-- **`posix_spawnattr_setsigdefault`/`setsigmask` stubbed** -- Require API 28, we target API 24. Bun uses its own `posix_spawn_bun()` which handles signals directly.
-- **No separate `-lpthread`** -- Bionic merges pthread into libc. Removed from link flags.
-- **`pwrite64` not used on Android** -- Android/Bionic uses standard `pwrite`, not the glibc compat symbol.
-- **`open()` flag fix** -- Removed third argument (mode) from `open()` call when not creating a file (Bionic is stricter about this).
-
-#### JSC/JIT fixes
-- **Signal-based VM traps disabled** (`usePollingTraps=true`) -- Android's `debuggerd` crash handler intercepts SIGSEGV before the app's signal handler, so JSC's signal-based traps crash the process instead of being caught.
-- **Wasm fault signal handler disabled** (`useWasmFaultSignalHandler=false`) -- Same `debuggerd` issue. Uses explicit bounds checking instead.
-- **Options set via `setenv("JSC_*")` BEFORE `JSC::initialize()`** -- `Options::initialize()` resets all options to defaults before reading env vars. Setting options via the API before `initialize()` has no effect.
-
-#### Standalone binary format
-- **`StandaloneModuleGraph.zig` Offsets struct extended** -- Added `compile_exec_argv_ptr`, `flags` fields and `Flags` type to match the format produced by host Bun 1.3.2.
-- **`find()` function bug fix** -- Fixed variable name from `base_path` to `name` in `isBunStandaloneFilePath()` call (this was actually an upstream bug).
-
-#### Platform detection
-- **`isAndroid` constant** added to `env.zig` -- `isLinux and abi == .android`.
-- **`isMusl` excludes Android** -- Android uses Bionic, not musl.
-- **`bun upgrade` disabled on Android** -- No Android release channel exists.
-- **Crash handler**: Enhanced with aarch64 register dump and `/proc/self/maps` output for debugging crashes on Android.
-- **File descriptor limit**: Raised on Android (like musl) since Termux has low defaults.
-- **npm libc detection**: Reports as `glibc` for package resolution compatibility.
-
-#### Other
-- **Post-build test skip** -- CMake tries to run `bun --revision` after linking; can't run aarch64 binary on x86_64 host. Added `if(NOT ANDROID)` guard.
-- **`features.json` skip** -- Same issue; generation requires running the binary.
-- **CI artifact naming** -- Uses `bun-android-aarch64` triplet.
-
-### WebKit Patches (5 files)
-
-- **`bcmp` replaced with `memcmp`** -- `bcmp` is BSD, not available in Bionic's `libpas`.
-- **`aligned_alloc` replaced with `posix_memalign`** -- `aligned_alloc` requires API 28, we target API 24.
-- **`backtrace()` stubbed** -- Requires API 33.
-- **`pthread_getname_np` stubbed** -- Requires API 26.
-- **JSC `InitializeThreading.cpp`** -- Force polling traps and disable Wasm signal handler on Android (same rationale as Bun patches).
-
-### Zig Stdlib Patch (1 file)
-
-- **`sigaction()` and `sigprocmask()` bypass Bionic libc** -- Bionic's `struct sigaction` is 32 bytes with 8-byte `sigset_t`, but Zig's `linux.Sigaction` is 152 bytes with 128-byte `sigset_t`. Passing Zig's struct through Bionic's `sigaction()` causes silent memory corruption. The patch makes these functions use raw `rt_sigaction`/`rt_sigprocmask` syscalls on Android, which correctly handle the kernel's struct layout.
-
-### OpenTUI Patch (1 file)
-
-- **Link NDK `libc.so` stub** -- On Android, the `.so` must have `NEEDED: libc.so` in its ELF headers so `dlopen()` can resolve symbols like `getauxval`. Zig doesn't bundle Android libc, so we directly add the NDK sysroot's `libc.so` stub as a link input.
-
----
-
-## How the Standalone Binary Works
-
-Since `bun build --compile` has no Android cross-compilation target, we use a manual approach:
-
-1. Use **host Bun (v1.3.2)** to `bun build --compile` OpenCode for the host platform
-2. Extract the serialized **module graph** from the host standalone binary by locating the `\n---- Bun! ----\n` trailer and reading the `Offsets` struct
-3. Patch the module graph in-place (fix `undici` global reference)
-4. Before bundling, swap x86_64 `libopentui.so` with the ARM64 Android-built version, so it gets embedded in the module graph
-5. Append the module graph to our **Android Bun** binary
-6. Write a new 8-byte `total_byte_count` footer
-
-The standalone binary format:
-```
-[Android Bun binary (~96 MB)]
-[Module graph bytes (~46 MB)]
-[total_byte_count as u64 LE (8 bytes)]
-```
-
-### Why host Bun must be pinned to v1.3.2
-
-The `CompiledModuleGraphFile` struct layout changed between Bun versions:
-- **Bun <= 1.3.2**: 36-byte stride (4 StringPointers + 3 u8 + 1 padding)
-- **Bun >= 1.3.11**: 52-byte stride (6 StringPointers + 4 u8)
-
-The target Android Bun is v1.2.13, which expects 36-byte stride. If the host Bun produces 52-byte modules, the target reads garbage and OOMs immediately (RSS jumps to 1GB on startup).
-
-We can't use Bun 1.2.13 as host either, because OpenCode's monorepo uses `catalog:` workspace protocol (added in Bun 1.3.x) -- `bun install` fails. **Bun 1.3.2 is the sweet spot**: supports `catalog:` AND produces compatible 36-byte modules.
-
----
-
-## Known Issues
-
-### Working
-- Full TUI rendering (ASCII art logo, prompt, model selector, status bar)
-- All backend services (server, provider, file watcher, LSP)
-- `opencode --version` outputs correct version
-- AI provider connections (tested with Claude, GitHub Copilot)
-
-### Not working / degraded
-
-| Issue | Severity | Details |
-|-------|----------|---------|
-| File watcher native module | Low | `@parcel/watcher` `.node` binding is compiled for x86_64. Falls back gracefully to polling. Logs: `dlopen failed: "...00000001.node" is for EM_X86_64 (62) instead of EM_AARCH64 (183)` |
-| `bun upgrade` | Low | Disabled on Android -- no Android release channel exists upstream |
-| TinyCC FFI compilation | Low | `libtcc.a` is linked but TCC's runtime code generation may not produce valid ARM64 code. FFI is not commonly used by OpenCode. |
-| SIGPWR signals | None | Many SIGPWR signals appear in strace -- related to Android's power management or Bun's signal handling. Not errors. |
-
-### Workarounds in use
-
-| Workaround | Why |
-|-----------|-----|
-| Host Bun pinned to 1.3.2 | Module graph struct compatibility between host and target Bun versions (see above) |
-| `close_range()` replaced with `/proc/self/fd` iteration | Android seccomp blocks the `close_range` syscall in app processes |
-| `preadv2`/`pwritev2`/`epoll_pwait2` return ENOSYS | Seccomp may block these; callers fall back gracefully |
-| `setenv("JSC_*")` before `JSC::initialize()` | Options API is reset during initialization; env vars survive the reset |
-| `.tbss` section with 64-byte alignment in assembly | Forces `PT_TLS p_align=64` to avoid corrupting Bionic's TCB slots |
-| Raw `rt_sigaction`/`rt_sigprocmask` syscalls | Zig's struct layout doesn't match Bionic's; bypass libc entirely |
-| NDK `libc.so` stub linked into `libopentui.so` | Zig doesn't provision Android libc; explicit link needed for `dlopen` symbol resolution |
-| Module graph extracted via trailer, not `process.execPath` | `process.execPath` is unreliable in CI; trailer-based extraction is version-agnostic |
-
----
-
-## Upstream PR Opportunities
-
-These patches could potentially be contributed upstream to reduce the maintenance burden of this project.
-
-### Bun (oven-sh/bun) -- Partial upstreaming possible
-
-The Bun team [closed Android support as "not planned"](https://github.com/oven-sh/bun/issues/9). However, some patches are clean improvements regardless of Android:
-
-| Patch | Upstreamable? | Notes |
-|-------|:---:|-------|
-| `StandaloneModuleGraph.zig` `find()` bug fix (`base_path` -> `name`) | Yes | This is an actual bug in upstream Bun |
-| `CARGO_ENCODED_RUSTFLAGS` -> `RUSTFLAGS` | Maybe | Simpler, avoids CMake 0x1F encoding issues. May have side effects on other platforms. |
-| `open()` mode argument fix in `bsd.c` | Yes | Passing a mode to `open()` without `O_CREAT` is technically undefined behavior |
-| Android CMake toolchain + `if(ANDROID)` guards | No | Team has explicitly declined Android support |
-| Syscall fallbacks (`close_range`, `preadv2`, etc.) | No | Only needed on Android |
-| Bionic libc stubs (`pthread_setcancelstate`, etc.) | No | Only needed on Android |
-| TLS alignment fix | No | Only needed for Android/aarch64 Bionic |
-| JSC signal trap changes | No | Only needed on Android due to debuggerd |
-| `isAndroid` environment detection | No | Only needed on Android |
-
-**Recommendation**: Submit a small PR with the `find()` bug fix and the `open()` mode fix. These are correctness improvements that benefit all platforms. The rest is Android-specific and will be rejected per Bun team policy.
-
-### WebKit (oven-sh/WebKit) -- Unlikely
-
-| Patch | Upstreamable? | Notes |
-|-------|:---:|-------|
-| `bcmp` -> `memcmp` | Maybe | `memcmp` is more portable, but oven-sh may not care since they only target macOS/Linux/Windows |
-| `aligned_alloc` -> `posix_memalign` | No | Only needed for Android API < 28 |
-| `backtrace()` stub | No | Only needed for Android API < 33 |
-| `pthread_getname_np` stub | No | Only needed for Android API < 26 |
-| Polling traps + Wasm signal handler | No | Only needed on Android |
-
-**Recommendation**: The `bcmp` -> `memcmp` change is the only candidate, but it's unlikely to be accepted since oven-sh/WebKit is a Bun-specific fork. Not worth the effort.
-
-### Zig (oven-sh/zig) -- Should be upstreamed
-
-| Patch | Upstreamable? | Notes |
-|-------|:---:|-------|
-| `sigaction`/`sigprocmask` Android bypass | Yes | This is a real bug: Zig's POSIX layer corrupts memory on Android/Bionic due to struct size mismatch |
-
-**Recommendation**: This should be submitted to upstream Zig (ziglang/zig), not just oven-sh/zig. The struct layout mismatch between Zig's `Sigaction` (152 bytes) and Bionic's `struct sigaction` (32 bytes) is a genuine bug that affects any Zig program targeting Android. The fix (using raw syscalls on Android) is clean and correct.
-
-**Note**: oven-sh/zig is Bun's custom Zig fork (v0.14.0), not upstream Zig. The patch should be adapted for current Zig master as well.
-
-### OpenTUI (anomalyco/opentui) -- Should be upstreamed
-
-| Patch | Upstreamable? | Notes |
-|-------|:---:|-------|
-| NDK libc.so stub linking for Android | Yes | Clean, conditionally compiled, needed for any Android target |
-
-**Recommendation**: Submit a PR to `anomalyco/opentui`. The patch correctly detects Android targets in `build.zig` and links the NDK's `libc.so` stub only when targeting `aarch64-linux-android`. It's a small, self-contained change that enables Android support without affecting other targets.
-
-### What will never make it upstream
-
-- **Bun Android support as a whole** -- The Bun team has explicitly declined this. The CMake toolchain, all `if(ANDROID)` guards, syscall fallbacks, Bionic stubs, and TLS alignment fix are permanent patches we'll need to maintain for every Bun version bump.
-- **WebKit Android patches** -- oven-sh/WebKit only supports macOS/Linux/Windows. No incentive to accept Android-specific changes.
-- **Host Bun version pinning** -- This is a build-time constraint, not a code patch. It will need to be re-evaluated with each Bun version bump (checking if the `CompiledModuleGraphFile` struct changed).
-- **Standalone binary surgery** (module graph extraction + transplant) -- This entire approach is a workaround for the lack of cross-compilation in `bun build --compile`. If Bun ever adds cross-compile targets, this becomes unnecessary.
-
----
-
-## Version Pins
-
-| Component | Version/Commit | Why pinned |
-|-----------|---------------|------------|
-| Bun (target) | v1.2.13 (tag `bun-v1.2.13`) | Proven working, patches validated |
-| Bun (host) | v1.3.2 | Module graph compat (36-byte stride) + catalog: support |
-| WebKit/JSC | `017930eb` (oven-sh/WebKit) | Matches Bun v1.2.13's expected WebKit |
-| ICU | 75.1 | Matches Bun v1.2.13's expected ICU |
-| Android NDK | r28b (28.1.13356709) | Clang 19, stable |
-| Android API level | 24 (Android 7.0+) | Minimum for 64-bit Termux |
-| Zig (for opentui) | 0.15.2 | Latest stable, Android target support |
-| OpenCode | 1.3.13 | Current release |
-| TinyCC | `b91835d8` (oven-sh/tinycc) | Matches Bun v1.2.13's expected TinyCC |
-
----
-
-## Build Requirements
-
-- **Build host**: x86_64 Linux (Ubuntu 22.04+)
-- **RAM**: 16GB minimum (30GB recommended for WebKit link step)
-- **Disk**: 60GB+ free space
-- **CPU**: 8+ cores recommended (4 cores works but slow)
-
-### Required tools
-
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Android NDK | r28b (28.1.13356709) | Cross-compiler toolchain |
-| CMake | 3.24+ (CI installs 3.28) | Build system |
-| Ninja | 1.10+ | Build tool |
-| Rust | stable | lol-html crate (with `aarch64-linux-android` target) |
-| Go | 1.20+ | BoringSSL |
-| Zig | 0.15.2 | libopentui.so build |
-| Bun | 1.3.2 (host, pinned) | OpenCode bundling |
-| Python3 | 3.8+ | WebKit code generation |
-| Ruby | 2.7+ | WebKit code generation |
-| Perl | 5.20+ | WebKit code generation |
-
----
-
-## Tested On
-
-- Samsung Galaxy S10e (Android 12, Termux, aarch64) -- full TUI confirmed working
-- Meta Quest 2 (Android 12L, adb shell)
-
----
-
-## Credits
-
-- [OpenCode](https://github.com/anomalyco/opencode) by Anomaly
-- [Bun](https://github.com/oven-sh/bun) by Oven
-- [WebKit/JavaScriptCore](https://github.com/oven-sh/WebKit) (oven-sh fork)
-- [OpenTUI](https://github.com/anomalyco/opentui) by Anomaly
-- [Termux](https://termux.dev/) -- terminal emulator for Android
+**Requirements:**
+- Android NDK r28+
+- Host Bun (for bundling)
+- Linux build environment (CI/CD or WSL)
+
+## Compatibility Summary
+
+| Feature | Stock/upstream approach | This repository |
+|---------|------------------------|-----------------|
+| Android 10 support | ❌ | ✅ |
+| Built-in seccomp shim | ❌ | ✅ Built-in |
+| libtagfix.so | External asset | Built from source |
+| libseccomp_shim.so | ❌ Missing | ✅ Built-in |
+| OPENCODE_SERVER_PASSWORD | Broken | Fixed (process.env restore) |
+| MCP via npx | Broken | Fixed (node absolute path) |
+| Target Android | 11+ | **10+** |
 
 ## License
 
-MIT
+MIT License - same as upstream OpenCode.
 
+## Contributing
 
----
+This build maintains compatibility with upstream OpenCode while adding Android 10 support.
+PRs welcome for:
+- Android 9 support (seccomp policy may differ)
+- Additional MCP server integrations
+- Performance optimizations
 
-# Android 10 compatibility (this fork)
-
-Upstream `guysoft/opencode-termux` targets newer Android releases. On **Android 10**
-(API 29) the binary starts but dies shortly after with a seccomp kill. This fork adds
-the fixes needed to run there, integrated into the build so the published packages
-already contain them.
-
-Verified on: **HONOR PCT-AL10, Android 10, kernel 4.14.116, arm64-v8a**.
-
-## Symptom
-
-`opencode serve` starts, prints `opencode server listening on http://0.0.0.0:4096`,
-then dies after ~30-120 seconds:
-
-```
-Fatal signal 31 (SIGSYS), code 1 (SYS_SECCOMP) in tid 5276 (opencode.bin)
-Cause: seccomp prevented call to disallowed arm64 system call 291   (openat2)
-Cause: seccomp prevented call to disallowed arm64 system call 434   (pidfd_open)
-```
-
-## Root cause
-
-Android 10's per-app seccomp allow-list predates these syscalls, so instead of
-returning `ENOSYS` the kernel delivers **SIGSYS** and kills the process.
-
-Bun already has errno-based fallbacks for some of these
-([oven-sh/bun#32489](https://github.com/oven-sh/bun/issues/32489) for
-`epoll_pwait2`, [#39060](https://github.com/oven-sh/bun/issues/39060) for
-`openat2`/`fchmodat2`), but those only fire when the syscall **returns** an error. A
-SIGSYS kill happens before any fallback runs, so nothing in Bun can recover - which
-is why this has to be fixed below Bun, at the preload layer.
-
-| syscall | number (arm64) | used by |
-|---------|---------------|---------|
-| `openat2` | 291 | Bun package install / path resolution |
-| `pidfd_open` | 434 | process handling |
-| `epoll_pwait2` | 441 | Bun event loop |
-| `close_range` | 436 | fd cleanup |
-
-## The fix: `libseccomp_shim.so`
-
-`src/seccomp_shim.c` is a small `LD_PRELOAD` library that installs a SIGSYS handler
-and rewrites the interrupted syscall's return register to `-ENOSYS`. Bun then sees
-the syscall "fail" the way it already knows how to handle and takes its own fallback
-path.
-
-It is deliberately **generic** - it converts every `SYS_SECCOMP` SIGSYS into
-`ENOSYS` rather than allow-listing specific syscall numbers, so it survives Bun
-changing which syscalls it uses.
-
-Two details worth preserving if you edit the source:
-
-- the handler is reinstalled ~200 ms after load, because Bun installs its own signal
-  handlers during startup and would otherwise clobber ours;
-- `sigaction()` is intercepted so attempts to replace the SIGSYS handler are
-  neutralised.
-
-### How it is built in
-
-Nothing here is a post-install patch - every native library is produced by the
-build and shipped in the packages:
-
-- `scripts/build-native-libs.sh` builds/bundles the three compat libraries:
-  - `src/seccomp_shim.c` → `libseccomp_shim.so` (this shim)
-  - `src/tagfix.c` → `libtagfix.so`
-  - `libc++_shared.so` copied from the NDK
-  It cross-compiles with the NDK when available and falls back to a native
-  compiler (clang inside Termux is already aarch64).
-- `scripts/make-packages.sh` calls it, then bundles `opencode.bin` plus every
-  native library in all three package formats (zip / pacman / deb).
-- `scripts/opencode-wrapper.sh` is the generated wrapper: it preloads
-  `libtagfix.so` **and** `libseccomp_shim.so` (each only if present, so the
-  wrapper stays compatible with builds that predate either one).
-
-So installing a package from this fork is enough - no manual patching step.
-
-### `libtagfix.so` is built here too
-
-Upstream shipped `libtagfix.so` and `libc++_shared.so` only as release assets
-with no build rule in the repo. This fork adds them to the build:
-
-- `src/tagfix.c` reproduces `libtagfix.so` - a constructor that calls
-  `mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE)`, i.e.
-  `mallopt(-204, 0)`. Verified instruction-for-instruction against the upstream
-  binary (`mov w0, #-0xcc; mov w1, wzr; b mallopt`).
-- `libc++_shared.so` is not something to compile - it is copied from the NDK
-  sysroot. Missing NDK means it is skipped with a warning.
-
-### Relationship to `libtagfix.so`
-
-The two libraries fix different crashes and are preloaded together:
-
-| library | fixes |
-|---------|-------|
-| `libtagfix.so` | `SIGABRT` "Pointer tag ... was truncated" (bionic heap tagging, Android 11+) |
-| `libseccomp_shim.so` | `SIGSYS` / "Bad system call" (seccomp kills, Android 10) |
-
-## Building
-
-```bash
-./scripts/apply-patches.sh       # clone + patch bun / webkit
-./scripts/build-bun.sh
-./scripts/build-opentui.sh
-./scripts/build-opencode.sh      # produces dist/opencode
-./scripts/make-packages.sh       # builds the shim + packages everything
-```
-
-To cross-compile the shims, point `ANDROID_NDK_ROOT` (or `ANDROID_NDK_HOME`) at
-your NDK; otherwise the script uses whatever aarch64-capable clang/gcc is on
-`PATH` (clang inside Termux is already aarch64). `libc++_shared.so` is copied
-from the NDK, so it is only bundled when the NDK is available - if it is missing
-the build warns and continues.
-
-Verify the shim is active on device:
-
-```bash
-tr '\0' '\n' < /proc/<pid>/environ | grep LD_PRELOAD
-# libtagfix.so:libseccomp_shim.so:libtermux-exec-ld-preload.so
-```
-
-## Running (`termux/start-opencode.sh`)
-
-Sets the environment variables that matter and starts the headless server:
-
-| variable | why |
-|----------|-----|
-| `OPENCODE_SERVER_PASSWORD` | HTTP basic-auth password (username defaults to `opencode`) |
-| `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` | escape hatch from [oven-sh/bun#32490](https://github.com/oven-sh/bun/pull/32490) that keeps the event loop off `epoll_pwait2`. Harmless on Bun 1.2.13 (ignored), useful on newer Bun. |
-
-## Known Android 10 issues (not yet fixed)
-
-1. **`OPENCODE_SERVER_PASSWORD` has no effect** - the server logs
-   "password is not set; server is unsecured" and serves without basic auth. Looks
-   like a bug in the 1.17.9 build, not configuration.
-2. **MCP servers must not be launched via `npx`** - Bun's subprocess spawn mishandles
-   npx's `#!/usr/bin/env node` shebang, producing
-   `MCP error -32000: Connection closed`. Install the MCP package globally and point
-   the config at `node /abs/path/to/dist/index.js` instead.
-3. **Plugin subprocesses must use an explicit `node`** - plugins that shell out to
-   `.js` helpers cannot use `process.execPath` (which is the Bun binary under
-   opencode); resolve a real node path instead.
-4. **No IPv6** - phones on this firmware get no global IPv6 address, so DDNS updates
-   are IPv4-only.
-
-See `docs/TERMUX_OPENCODE_PATCHES.md` for the full patch-by-patch writeup.
+See [CHANGELOG.md](CHANGELOG.md) for version history.

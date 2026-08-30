@@ -4,8 +4,9 @@
 # Environment variables set here matter:
 #   OPENCODE_SERVER_PASSWORD
 #       HTTP basic-auth password for the server (username defaults to
-#       "opencode").  NOTE: on guysoft 1.17.9 builds this is logged as
-#       "not set" and basic auth does not actually engage - see docs.
+#       "opencode").  On older 1.17.9 builds this was logged as "not set"
+#       and basic auth did not actually engage; this repository's build fixes
+#       it by restoring process.env from /proc/self/environ - see docs.
 #   BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1
 #       Escape hatch added in Bun 1.4.0 (oven-sh/bun#32490) that keeps the
 #       event loop off epoll_pwait2 (syscall 441), which Android's seccomp

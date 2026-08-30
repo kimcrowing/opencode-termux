@@ -163,7 +163,7 @@ cat > "$DEB_STAGING/DEBIAN/control" << EOF
 Package: opencode
 Version: ${OPENCODE_VERSION}
 Architecture: aarch64
-Maintainer: Guy Sheffer <guysoft@gmail.com>
+Maintainer: kimcrowing <kimcrowing@users.noreply.github.com>
 Installed-Size: ${INSTALLED_SIZE}
 Depends: ripgrep
 Section: utils
