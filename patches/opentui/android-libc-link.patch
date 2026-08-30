@@ -1,8 +1,8 @@
 diff --git a/packages/core/src/zig/build.zig b/packages/core/src/zig/build.zig
-index 9034757..0d805c7 100644
+index 9034757..4bb2066 100644
 --- a/packages/core/src/zig/build.zig
 +++ b/packages/core/src/zig/build.zig
-@@ -125,7 +125,25 @@ fn addMiniaudioShim(
+@@ -125,7 +125,28 @@ fn addMiniaudioShim(
      };
  
      artifact.addIncludePath(b.path("."));
@@ -11,14 +11,17 @@ index 9034757..0d805c7 100644
 +    // Zig 0.15.2 does not ship an Android (bionic) libc, so linkLibC() fails
 +    // with "unable to provide libc for target ...android". linkLibC() would also
 +    // provide no bionic headers. Skip it for Android and instead add the NDK
-+    // sysroot bionic usr/include as a system include path, so @cImport of
-+    // miniaudio can resolve pthread.h etc. (libc.so itself is linked in buildTarget).
++    // sysroot bionic headers (generic usr/include plus the arch-specific
++    // usr/include/<triple> that holds asm/, android/, etc.) as system include
++    // paths, so @cImport of miniaudio can resolve pthread.h, asm/types.h, etc.
++    // (libc.so itself is linked in buildTarget).
 +    const is_android = target.result.os.tag == .linux and
 +        (target.result.abi == .android or target.result.abi == .androideabi);
 +    if (is_android) {
 +        if (std.process.getEnvVarOwned(b.allocator, "ANDROID_NDK_HOME") catch null) |ndk_home| {
 +            const sysroot = b.pathJoin(&.{ ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "sysroot" });
 +            artifact.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
++            artifact.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", "aarch64-linux-android" }) });
 +        } else {
 +            std.debug.print("WARNING: ANDROID_NDK_HOME not set; bionic libc headers unavailable\n", .{});
 +        }
@@ -29,7 +32,7 @@ index 9034757..0d805c7 100644
      artifact.addCSourceFile(.{
          .file = b.path("miniaudio_shim.c"),
          .flags = c_flags,
-@@ -162,8 +180,13 @@ fn addNativeAudioDependencies(
+@@ -162,8 +183,13 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, artifact, macos_sdk_path.?),
          .linux => {
@@ -45,7 +48,7 @@ index 9034757..0d805c7 100644
          },
          else => {},
      }
-@@ -451,6 +474,29 @@ fn buildTarget(
+@@ -451,6 +477,29 @@ fn buildTarget(
  
      addNativeAudioDependencies(b, lib, target, macos_sdk_path);
  
