@@ -386,3 +386,152 @@ The Bun team [closed Android support as "not planned"](https://github.com/oven-s
 ## License
 
 MIT
+
+
+---
+
+# Android 10 compatibility (this fork)
+
+Upstream `guysoft/opencode-termux` targets newer Android releases. On **Android 10**
+(API 29) the binary starts but dies shortly after with a seccomp kill. This fork adds
+the fixes needed to run there, integrated into the build so the published packages
+already contain them.
+
+Verified on: **HONOR PCT-AL10, Android 10, kernel 4.14.116, arm64-v8a**.
+
+## Symptom
+
+`opencode serve` starts, prints `opencode server listening on http://0.0.0.0:4096`,
+then dies after ~30-120 seconds:
+
+```
+Fatal signal 31 (SIGSYS), code 1 (SYS_SECCOMP) in tid 5276 (opencode.bin)
+Cause: seccomp prevented call to disallowed arm64 system call 291   (openat2)
+Cause: seccomp prevented call to disallowed arm64 system call 434   (pidfd_open)
+```
+
+## Root cause
+
+Android 10's per-app seccomp allow-list predates these syscalls, so instead of
+returning `ENOSYS` the kernel delivers **SIGSYS** and kills the process.
+
+Bun already has errno-based fallbacks for some of these
+([oven-sh/bun#32489](https://github.com/oven-sh/bun/issues/32489) for
+`epoll_pwait2`, [#39060](https://github.com/oven-sh/bun/issues/39060) for
+`openat2`/`fchmodat2`), but those only fire when the syscall **returns** an error. A
+SIGSYS kill happens before any fallback runs, so nothing in Bun can recover - which
+is why this has to be fixed below Bun, at the preload layer.
+
+| syscall | number (arm64) | used by |
+|---------|---------------|---------|
+| `openat2` | 291 | Bun package install / path resolution |
+| `pidfd_open` | 434 | process handling |
+| `epoll_pwait2` | 441 | Bun event loop |
+| `close_range` | 436 | fd cleanup |
+
+## The fix: `libseccomp_shim.so`
+
+`src/seccomp_shim.c` is a small `LD_PRELOAD` library that installs a SIGSYS handler
+and rewrites the interrupted syscall's return register to `-ENOSYS`. Bun then sees
+the syscall "fail" the way it already knows how to handle and takes its own fallback
+path.
+
+It is deliberately **generic** - it converts every `SYS_SECCOMP` SIGSYS into
+`ENOSYS` rather than allow-listing specific syscall numbers, so it survives Bun
+changing which syscalls it uses.
+
+Two details worth preserving if you edit the source:
+
+- the handler is reinstalled ~200 ms after load, because Bun installs its own signal
+  handlers during startup and would otherwise clobber ours;
+- `sigaction()` is intercepted so attempts to replace the SIGSYS handler are
+  neutralised.
+
+### How it is built in
+
+Nothing here is a post-install patch - every native library is produced by the
+build and shipped in the packages:
+
+- `scripts/build-native-libs.sh` builds/bundles the three compat libraries:
+  - `src/seccomp_shim.c` → `libseccomp_shim.so` (this shim)
+  - `src/tagfix.c` → `libtagfix.so`
+  - `libc++_shared.so` copied from the NDK
+  It cross-compiles with the NDK when available and falls back to a native
+  compiler (clang inside Termux is already aarch64).
+- `scripts/make-packages.sh` calls it, then bundles `opencode.bin` plus every
+  native library in all three package formats (zip / pacman / deb).
+- `scripts/opencode-wrapper.sh` is the generated wrapper: it preloads
+  `libtagfix.so` **and** `libseccomp_shim.so` (each only if present, so the
+  wrapper stays compatible with builds that predate either one).
+
+So installing a package from this fork is enough - no manual patching step.
+
+### `libtagfix.so` is built here too
+
+Upstream shipped `libtagfix.so` and `libc++_shared.so` only as release assets
+with no build rule in the repo. This fork adds them to the build:
+
+- `src/tagfix.c` reproduces `libtagfix.so` - a constructor that calls
+  `mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE)`, i.e.
+  `mallopt(-204, 0)`. Verified instruction-for-instruction against the upstream
+  binary (`mov w0, #-0xcc; mov w1, wzr; b mallopt`).
+- `libc++_shared.so` is not something to compile - it is copied from the NDK
+  sysroot. Missing NDK means it is skipped with a warning.
+
+### Relationship to `libtagfix.so`
+
+The two libraries fix different crashes and are preloaded together:
+
+| library | fixes |
+|---------|-------|
+| `libtagfix.so` | `SIGABRT` "Pointer tag ... was truncated" (bionic heap tagging, Android 11+) |
+| `libseccomp_shim.so` | `SIGSYS` / "Bad system call" (seccomp kills, Android 10) |
+
+## Building
+
+```bash
+./scripts/apply-patches.sh       # clone + patch bun / webkit
+./scripts/build-bun.sh
+./scripts/build-opentui.sh
+./scripts/build-opencode.sh      # produces dist/opencode
+./scripts/make-packages.sh       # builds the shim + packages everything
+```
+
+To cross-compile the shims, point `ANDROID_NDK_ROOT` (or `ANDROID_NDK_HOME`) at
+your NDK; otherwise the script uses whatever aarch64-capable clang/gcc is on
+`PATH` (clang inside Termux is already aarch64). `libc++_shared.so` is copied
+from the NDK, so it is only bundled when the NDK is available - if it is missing
+the build warns and continues.
+
+Verify the shim is active on device:
+
+```bash
+tr '\0' '\n' < /proc/<pid>/environ | grep LD_PRELOAD
+# libtagfix.so:libseccomp_shim.so:libtermux-exec-ld-preload.so
+```
+
+## Running (`termux/start-opencode.sh`)
+
+Sets the environment variables that matter and starts the headless server:
+
+| variable | why |
+|----------|-----|
+| `OPENCODE_SERVER_PASSWORD` | HTTP basic-auth password (username defaults to `opencode`) |
+| `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` | escape hatch from [oven-sh/bun#32490](https://github.com/oven-sh/bun/pull/32490) that keeps the event loop off `epoll_pwait2`. Harmless on Bun 1.2.13 (ignored), useful on newer Bun. |
+
+## Known Android 10 issues (not yet fixed)
+
+1. **`OPENCODE_SERVER_PASSWORD` has no effect** - the server logs
+   "password is not set; server is unsecured" and serves without basic auth. Looks
+   like a bug in the 1.17.9 build, not configuration.
+2. **MCP servers must not be launched via `npx`** - Bun's subprocess spawn mishandles
+   npx's `#!/usr/bin/env node` shebang, producing
+   `MCP error -32000: Connection closed`. Install the MCP package globally and point
+   the config at `node /abs/path/to/dist/index.js` instead.
+3. **Plugin subprocesses must use an explicit `node`** - plugins that shell out to
+   `.js` helpers cannot use `process.execPath` (which is the Bun binary under
+   opencode); resolve a real node path instead.
+4. **No IPv6** - phones on this firmware get no global IPv6 address, so DDNS updates
+   are IPv4-only.
+
+See `docs/TERMUX_OPENCODE_PATCHES.md` for the full patch-by-patch writeup.

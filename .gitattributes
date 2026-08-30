@@ -1,0 +1,9 @@
+# Shell scripts and C sources must keep LF endings - CRLF breaks shebangs and
+# makes shell variables pick up a trailing \r (e.g. REPO_ROOT="/repo\r").
+*.sh      text eol=lf
+*.c       text eol=lf
+*.h       text eol=lf
+*.patch   -text diff
+*.md      text eol=lf
+*.ts      text eol=lf
+*.yml     text eol=lf
