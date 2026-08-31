@@ -51,7 +51,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -66,7 +66,7 @@ jobs:
 
       - name: Install Android NDK r28b (cached)
         id: ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/android-ndk
           key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
@@ -100,14 +100,14 @@ jobs:
           ls -lh icu-prefix.tar
 
       - name: Upload ICU prefix
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: icu-prefix
           path: ${{ runner.temp }}/opencode-build/icu-prefix.tar
           if-no-files-found: error
 
       - name: Cache ICU prefix (fast rerun)
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/deps-android/prefix
           key: icu-${{ env.ICU_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
@@ -123,7 +123,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -161,7 +161,7 @@ jobs:
 
       - name: Install Android NDK r28b (cached)
         id: ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/android-ndk
           key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
@@ -184,7 +184,7 @@ jobs:
           echo "/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
       - name: Download ICU prefix
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: icu-prefix
           path: /tmp/icu
@@ -215,14 +215,14 @@ jobs:
           ls -lh webkit-output.tar
 
       - name: Upload WebKit output
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: webkit-output
           path: ${{ runner.temp }}/opencode-build/webkit-output.tar
           if-no-files-found: error
 
       - name: Cache WebKit output (fast rerun)
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/webkit-android
           key: webkit-${{ env.WEBKIT_COMMIT }}-${{ env.ICU_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
@@ -238,7 +238,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -248,7 +248,7 @@ jobs:
 
       - name: Install Android NDK r28b (cached)
         id: ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/android-ndk
           key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
@@ -303,7 +303,7 @@ jobs:
              "$RUNNER_TEMP/opentui-artifact/"
 
       - name: Upload libopentui.so
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: libopentui
           path: ${{ runner.temp }}/opentui-artifact/libopentui.so
@@ -321,7 +321,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -342,7 +342,7 @@ jobs:
 
       - name: Install Android NDK r28b (cached)
         id: ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/android-ndk
           key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
@@ -402,7 +402,7 @@ jobs:
           echo "$ZIG_DIR" >> $GITHUB_PATH
 
       - name: Download WebKit output
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: webkit-output
           path: /tmp/webkit
@@ -445,14 +445,14 @@ jobs:
           cp "$BUN_BUILD/bun" "$RUNNER_TEMP/bunbin-artifact/bun"
 
       - name: Upload Bun binary
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: bun-bin
           path: ${{ runner.temp }}/bunbin-artifact/bun
           if-no-files-found: error
 
       - name: Cache Bun build dir (fast rerun)
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/opencode-build/bun-build
           key: bun-${{ env.BUN_VERSION }}-${{ env.WEBKIT_COMMIT }}-${{ hashFiles('.github/workflows/build.yml') }}
@@ -468,7 +468,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -492,13 +492,13 @@ jobs:
           echo "Host Bun version: $(bun --version)"
 
       - name: Download Bun binary
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: bun-bin
           path: /tmp/bun
 
       - name: Download libopentui
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: libopentui
           path: /tmp/opentui
@@ -541,7 +541,7 @@ jobs:
           ls -lh "$STAGE"
 
       - name: Upload dist stage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: dist-stage
           path: ${{ runner.temp }}/dist-stage/
@@ -559,7 +559,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Create work directory
         run: |
@@ -574,7 +574,7 @@ jobs:
 
       - name: Install Android NDK r28b (cached, for libc++_shared.so)
         id: ndk
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/android-ndk
           key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
@@ -595,7 +595,7 @@ jobs:
           echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> $GITHUB_ENV
 
       - name: Download dist stage
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: dist-stage
           path: /tmp/dist
@@ -621,7 +621,7 @@ jobs:
           ls -lh "${WORK_DIR}/packages/"
 
       - name: Upload packages as artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: opencode-termux-${{ env.OPENCODE_VERSION }}
           path: |
