@@ -1,5 +1,7 @@
 # OpenCode for Termux (Android)
 
+Read this in [中文 (Chinese)](README.zh-CN.md).
+
 Cross-compile [OpenCode](https://github.com/anomalyco/opencode) to run natively on
 Android devices via [Termux](https://termux.dev/).
 
@@ -31,6 +33,50 @@ build-opencode  ->  opencode (official Bun 1.4 cross-compiled for Android)
 Triggered by a `v*` tag push (drafts a release) or `workflow_dispatch`
 (`opencode_version` input, default `1.18.25`). Stage jobs are isolated so a failed
 step only restarts itself.
+
+## Project architecture
+
+```
+                        ┌────────────────────────────────────────────────┐
+                        │          GitHub Actions (ubuntu-latest)        │
+                        │             from-source.yml                    │
+                        │                                                │
+  build-libopentui job  │   Zig 0.15.2        NDK r28 clang++            │
+  ─────────────────────▶│   build-opentui.sh  ──▶ libopentui.so          │
+                        │                                                │
+  build-opencode job    │   official Bun 1.4  ──▶ opencode (single file) │
+  ─────────────────────▶│   build-opencode-android.ts                    │
+                        │                                                │
+                        └────────────────────────────────────────────────┘
+                                        │ upload-artifact
+                                        ▼
+                              opencode + libopentui.so
+                                        │ release page (prebuilt set)
+                                        ▼
+   ┌─────────────┐   ┌───────────────┐   ┌───────────────────┐   ┌───────────┐
+   │ opencode    │ + │ libopentui.so │ + │ libtagfix.so      │ + │ libc++_   │
+   │ (Bun binary)│   │ (TUI render)  │   │ libseccomp_shim.so│   │ shared.so │
+   └─────────────┘   └───────────────┘   └───────────────────┘   └───────────┘
+          preloaded by wrapper: LD_PRELOAD + LD_LIBRARY_PATH + OPENTUI_LIB_PATH
+                                        │
+                                        ▼
+                        runs natively in Termux on Android 10+ (aarch64)
+```
+
+Directory layout:
+
+| Path | Purpose |
+|------|---------|
+| `.github/workflows/from-source.yml` | Two-stage CI: build `libopentui.so`, then bundle `opencode` (official Bun). Also `opencode.yml` (comment-triggered build) and `test-opentui.yml` (fast libopentui rebuild test). |
+| `scripts/env.sh` | Single source of build versions/paths/toolchain (NDK, Zig, Bun, target triple). |
+| `scripts/build-opentui.sh` | Compiles `libopentui.so` from opentui source (NDK clang++ for Yoga C++, Zig for the rest). |
+| `scripts/build-opencode-android.ts` | Bundles opencode into one `bun-linux-aarch64-android` binary with the web UI embedded. |
+| `src/tagfix.c` | Source of `libtagfix.so` (disables Android 11+ heap pointer tagging). |
+| `src/seccomp_shim.c` | Source of `libseccomp_shim.so` (converts Android 10 seccomp `SIGSYS` to `ENOSYS`). |
+| `patches/opentui/*.patch` | Android fixes applied to opentui source (libc link, platform-name normalization for v0.4.5). |
+| `termux/start-opencode.sh` | Headless server launcher (`opencode serve`, sets `OPENCODE_SERVER_PASSWORD` + `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2`). |
+| `docs/TERMUX_OPENCODE_PATCHES.md` | Patch/issue history. |
+| `cmake/` | Legacy self-built-chain toolchain (kept for reference; not used by from-source). |
 
 ## Android compat libraries
 
