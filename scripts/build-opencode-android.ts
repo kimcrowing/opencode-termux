@@ -119,7 +119,16 @@ try {
 }
 console.log(`Parser worker: ${parserWorkerResolved}`)
 
-const workerPath = "./src/cli/cmd/tui/worker.ts"
+// The TUI worker path changed across opencode versions:
+//   <=1.5.x: src/cli/cmd/tui/worker.ts
+//   >=1.6.x: src/cli/tui/worker.ts  (cmd/tui moved to tui/)
+// Resolve whichever exists so one script works for both local (1.3.13) and
+// CI (1.17.9) builds.
+const workerPath = fs.existsSync(path.join(OPENCODE_DIR, "src/cli/tui/worker.ts"))
+  ? "./src/cli/tui/worker.ts"
+  : fs.existsSync(path.join(OPENCODE_DIR, "src/cli/cmd/tui/worker.ts"))
+    ? "./src/cli/cmd/tui/worker.ts"
+    : (() => { throw new Error("Could not find tui worker.ts (tried src/cli/tui/ and src/cli/cmd/tui/)") })()
 
 const bunfsRoot = "/$bunfs/root/"
 const workerRelativePath = path.relative(OPENCODE_DIR, parserWorkerResolved).replaceAll("\\", "/")
