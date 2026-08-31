@@ -1,0 +1,20 @@
+--- a/src/node-asset-target.ts
++++ b/src/node-asset-target.ts
+@@ -40,13 +40,14 @@
+ 
+ export function getCurrentNodeAssetTarget(): NodeAssetTarget {
+   const libc = process.env.OPENTUI_LIBC
+-  if (process.platform === "linux" && libc !== undefined && libc !== "" && libc !== "glibc" && libc !== "musl") {
++  const platform = process.platform === "android" ? "linux" : process.platform
++  if (platform === "linux" && libc !== undefined && libc !== "" && libc !== "glibc" && libc !== "musl") {
+     throw new Error(`On Linux, OPENTUI_LIBC must be unset, empty, "glibc", or "musl", got ${JSON.stringify(libc)}`)
+   }
+ 
+   return {
+-    platform: process.platform as NodeAssetTarget["platform"],
++    platform: platform as NodeAssetTarget["platform"],
+     arch: process.arch as NodeAssetTarget["arch"],
+-    ...(process.platform === "linux" && libc === "musl" ? { libc } : {}),
++    ...(platform === "linux" && libc === "musl" ? { libc } : {}),
+   }
+ }

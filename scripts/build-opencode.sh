@@ -38,6 +38,21 @@ echo ">>> Installing OpenCode dependencies..."
 cd "$OPENCODE_SRC"
 "$HOST_BUN" install
 
+# Patch @opentui/core to accept Android as a Linux-ABI target. Bun on Android
+# reports process.platform === "android", which @opentui/core's asset target
+# allowlist rejects -> "Unsupported OpenTUI Node asset target: android-arm64".
+# This normalizes android -> linux so the render library discovers the .so via
+# @opentui/core-linux-arm64. (@opentui/core ships TS source; Bun compiles it.)
+OPENTUI_TARGET="$OPENCODE_SRC/node_modules/@opentui/core/src/node-asset-target.ts"
+if [ -f "$OPENTUI_TARGET" ]; then
+    echo ">>> Applying opentui android-platform-normalize patch"
+    cd "$OPENCODE_SRC/node_modules/@opentui/core"
+    patch -p1 --forward < "$REPO_ROOT/patches/opentui/android-platform-normalize-0.4.5.patch" \
+        || { echo "WARNING: opentui patch did not apply cleanly (may already be applied)"; }
+else
+    echo "WARNING: @opentui/core node-asset-target.ts not found at $OPENTUI_TARGET"
+fi
+
 # Find the Android bun binary
 ANDROID_BUN="$BUN_BUILD/bun"
 if [ ! -f "$ANDROID_BUN" ]; then
