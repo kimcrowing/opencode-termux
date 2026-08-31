@@ -1,10 +1,50 @@
-# OpenCode for Termux (Android 10+ Compatible Build)
+# OpenCode for Termux (Android)
 
-Build system for cross-compiling [OpenCode](https://github.com/anomalyco/opencode) to run natively on Android devices via [Termux](https://termux.dev/).
+Cross-compile [OpenCode](https://github.com/anomalyco/opencode) to run natively on
+Android devices via [Termux](https://termux.dev/).
 
-This repository provides an **independent, automated build system** that cross-compiles OpenCode for Android aarch64 with **Android 10 compatibility fixes** built in. Builds run automatically on GitHub-hosted runners.
+Standing on **OpenCode 1.18.25**, this repository provides an **independent, automated
+build system** (`.github/workflows/from-source.yml`) plus the native compat libraries the
+resulting binary needs to run on Android.
 
-On **Android 10 (API 29)** and similar older versions, upstream builds (which target newer Android versions) start but die after 30-120 seconds with:
+- Official **Bun 1.4** Android runtime (no self-built Bun/WebKit/ICU).
+- **`libopentui.so`** compiled from opentui source — the only native piece with no
+  official Android prebuild.
+- Runs on **Android 10+** with the seccomp/heap-tagging fixes built in.
+
+## What the from-source chain produces
+
+Two reusable GitHub Actions artifacts per run:
+
+```
+opencode       single-file Bun-compiled binary (bun-linux-aarch64-android)
+libopentui.so  ARM64 Android native TUI renderer
+```
+
+The Android build pipelines are:
+
+```
+build-libopentui ->  libopentui.so (aarch64-linux-android), Zig 0.15.2 + NDK r28
+build-opencode  ->  opencode (official Bun 1.4 cross-compiled for Android)
+```
+
+Triggered by a `v*` tag push (drafts a release) or `workflow_dispatch`
+(`opencode_version` input, default `1.18.25`). Stage jobs are isolated so a failed
+step only restarts itself.
+
+## Android compat libraries
+
+The two Bun binary still needs three **preloaded native libraries** that Android's
+bionic does not provide by default. Their sources live in this repo
+(`src/tagfix.c`, `src/seccomp_shim.c`); a prebuilt set ships on the release page.
+
+| Library | Fixes |
+|---------|-------|
+| `libtagfix.so` | Disables bionic **heap pointer tagging** (Android 11+). Bun/JSC NaN-boxing clears the ARM TBI tag on heap pointers, so bionic would `SIGABRT` on `free()` (`"Pointer tag ... was truncated"`). Sets heap tagging off via `mallopt` before JSC starts. |
+| `libseccomp_shim.so` | Converts seccomp **`SIGSYS` kills into `ENOSYS` returns** (Android 10). Android's per-app seccomp allow-list predates syscalls Bun uses (`openat2`, `pidfd_open`, `epoll_pwait2`), and delivers a kill instead of an errno, so Bun's own `ENOSYS` fallbacks never get to run. |
+| `libc++_shared.so` | C++ std library required by Bun's JIT modules (Android `/system` does not provide it). |
+
+On Android 10, without the shim the binary starts but dies within 30–120 s:
 
 ```
 Fatal signal 31 (SIGSYS), code 1 (SYS_SECCOMP)
@@ -12,180 +52,144 @@ Cause: seccomp prevented call to disallowed arm64 system call 291 (openat2)
 Cause: seccomp prevented call to disallowed arm64 system call 434 (pidfd_open)
 ```
 
-Android 10's per-app seccomp allow-list predates these syscalls, so the kernel sends SIGSYS instead of returning ENOSYS. Bun's errno-based fallbacks never get a chance to run.
-
-This build **integrates the fixes at compile time** so the published binaries run on Android 10+ out of the box.
-
-## What This Build Fixes
-
-| Issue | Solution |
-|-------|----------|
-| **SIGSYS crashes (Android 10)** | `libseccomp_shim.so` converts seccomp SIGSYS kills into ENOSYS returns, letting Bun's fallback paths work |
-| **SIGABRT on Android 11+** | `libtagfix.so` disables bionic heap pointer tagging that breaks Bun/JSC's NaN-boxing |
-| **MCP server crashes** | `npx` shebang fixed; MCP servers now use absolute `node` path |
-| **Bun process.env on Android** | Wrapper restores `process.env` from `/proc/self/environ` at startup |
-| **Bun epoll_pwait2 issue** | `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` disables problematic syscall |
-
 ## Installation
 
-### Option 1: Standalone Binary (Recommended)
-
-Download the latest release from [releases](https://github.com/kimcrowing/opencode-termux/releases):
+Grab the latest artifacts from [releases](https://github.com/kimcrowing/opencode-termux/releases)
+(or the `opencode-android` + `libopentui` action artifacts from a dispatch run), then:
 
 ```bash
-# Download and install
-mkdir -p $PREFIX/libexec/opencode $PREFIX/lib
-unzip opencode-*-android-aarch64.zip
-mv opencode $PREFIX/bin/opencode
-chmod +x $PREFIX/bin/opencode
-mv opencode.bin $PREFIX/libexec/opencode/opencode.bin
-chmod +x $PREFIX/libexec/opencode/opencode.bin
-mv libtagfix.so libc++_shared.so libopentui.so libseccomp_shim.so $PREFIX/lib/
-
-# Install required dependency
+mkdir -p ~/opencode18/{native,lib}
+cp opencode ~/opencode18/opencode.bin
+cp libopentui.so ~/opencode18/libopentui.so
+# compat libraries (from the release / an existing install)
+cp libtagfix.so libseccomp_shim.so libc++_shared.so ~/opencode18/lib/
+chmod +x ~/opencode18/opencode.bin
 pkg install ripgrep
-
-# Run
-opencode
 ```
 
-### Option 2: Pacman Package (Termux)
+### Launcher
+
+`opencode` **will not run standalone** — it needs the preloads and the native libs on
+the load path. Use a wrapper like this (this repo ships one at
+[`termux/start-opencode.sh`](termux/start-opencode.sh) for the server):
 
 ```bash
-curl -LO https://github.com/kimcrowing/opencode-termux/releases/latest/download/opencode-aarch64.pkg.tar.xz
-pacman -U opencode-*-aarch64.pkg.tar.xz
-opencode
+#!/data/data/com.termux/files/usr/bin/sh
+set -e
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+export TMPDIR="${TMPDIR:-$HOME/tmp}"; mkdir -p "$TMPDIR"
+export OPENCODE_DISABLE_TUI_AUDIO=1
+export LD_PRELOAD="${DIR}/lib/libtagfix.so:${DIR}/lib/libseccomp_shim.so"
+export LD_LIBRARY_PATH="${DIR}/lib"
+export OPENTUI_LIB_PATH="${DIR}/libopentui.so"
+
+exec "$DIR/opencode.bin" "$@"
 ```
 
-### Option 3: Deb Package
+Save it as `opencode` next to `opencode.bin`, `chmod +x`, and run it. Without the
+`LD_PRELOAD` of `libtagfix.so` you get a `Bad system call` (SIGSYS from bionic TBI
+heap tagging).
+
+## Running two versions side-by-side
+
+Install a new build under its own directory and call it by path — it shares nothing
+with an existing install except the data/config dirs (below):
 
 ```bash
-curl -LO https://github.com/kimcrowing/opencode-termux/releases/latest/download/opencode-aarch64.deb
-dpkg -i opencode-*.deb
-opencode
+opencode --version                        # existing install
+~/opencode18/opencode --version           # new build
 ```
 
-## What's Included in Each Package
-
-Every package contains:
-- `opencode` — wrapper script (preloads compat libraries)
-- `opencode.bin` — standalone Bun binary
-- `libtagfix.so` — disables bionic heap pointer tagging (Android 11+)
-- `libseccomp_shim.so` — seccomp SIGSYS shim for Android 10
-- `libopentui.so` — OpenTUI renderer (ARM64 Android build)
-- `libc++_shared.so` — C++ standard library (required by Bun JIT)
+> Data & config are shared: `~/.local/share/opencode/opencode.db`,
+> `~/.config/opencode/opencode.json` and the `~/.config/opencode/plugins/*` are used
+> by every version. This is intentional — sessions, credentials and plugins carry over
+> between test installs.
 
 ## Configuration
 
-Set your AI provider API key:
+Provider credentials are managed per-version through `opencode auth` / `providers list`
+(`~/.local/share/opencode/auth.json`). For the headless server, set:
 
 ```bash
-# Anthropic Claude
-export ANTHROPIC_API_KEY="sk-..."
-
-# Or OpenAI
-export OPENAI_API_KEY="sk-..."
-
-# Then run
-opencode
+export OPENCODE_SERVER_PASSWORD="secret"    # HTTP basic-auth password
+export OPENCODE_SERVER_USERNAME="opencode"  # default username
 ```
 
-## Running Two Versions Side-by-Side
-
-To test a new build **without overwriting an existing `opencode`**, install it under
-its own directory and call it by path or an alias. The two versions share nothing.
+## Server & HTTP API
 
 ```bash
-# 1. Download the opencode-android artifact (standalone + libopentui.so)
-unzip opencode-android.zip -d ~/opencode-new
-
-# 2. Place the native lib where the launcher expects it (OTUI_ASSET_ROOT)
-mkdir -p ~/opencode-new/native
-mv ~/opencode-new/libopentui.so ~/opencode-new/native/libopentui.so
-chmod +x ~/opencode-new/opencode
-
-# 3. Run the old and new versions independently
-opencode --version            # existing install
-~/opencode-new/opencode --version   # new build
-
-# 4. Optionally wrap the new one
-alias opencode-dev='~/opencode-new/opencode'
+./opencode serve --hostname 0.0.0.0 --port 4096
 ```
 
-> Note: the Android build needs the seccomp shim/preloads for older Android.
-> See the launcher in this repo (`bin/opencode` / the shared libs in `libexec`/`lib`)
-> for the exact `LD_PRELOAD`/`OTUI_ASSET_ROOT` environment the standalone needs,
-> and set them for your side-by-side path accordingly where required.
+The server authenticates with **HTTP Basic Auth** — `Authorization: Basic
+base64(<username>:<password>)` (username defaults to `opencode`, password from
+`OPENCODE_SERVER_PASSWORD`). Unauthenticated requests get `401`. `web`, `serve`
+and the `/session`, `/message`, `/part`, `/config`, `/tools`, `/models` endpoints all
+honour it.
 
+## Verified against 1.18.25 (2026-08-31)
 
-## What's Fixed vs Upstream
+Tested on this machine with the from-source 1.18.25 artifacts, installed as a side-by-side
+coexisting build:
 
-| Issue | Upstream | This Build |
-|-------|----------|-----------|
-| Android 10 SIGSYS crashes | ❌ Crashes | ✅ Fixed (seccomp shim) |
-| Android 11+ heap tagging SIGABRT | ❌ Crashes | ✅ Fixed (libtagfix) |
-| `list_documents` tool | ❌ Connection closed | ✅ Works (waf bypass) |
-| `OPENCODE_SERVER_PASSWORD` | ❌ Ignored | ✅ Fixed (process.env restore) |
-| MCP via `npx` | ❌ Connection closed | ✅ Use absolute `node` path |
-| `epoll_pwait2` crash | ❌ Crashes | `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1` |
+| Area | Result |
+|------|--------|
+| `--version` / `--help` / TUI logo | ✅ |
+| `debug paths` / `info` / `config` / `skill` | ✅ full config + 5 plugins + skills load |
+| `db` / `session list` / `export` / `stats` | ✅ reads/writes the shared DB |
+| `models` | ✅ 21 models (opencode free + codebuddy) |
+| `run` (real model call) | ✅ opencode/big-pickle returns |
+| MCP `mcp list` | ✅ firecrawl / scholar_mcp / browserless connected |
+| MCP real tool call | ✅ `firecrawl_firecrawl_search` invoked |
+| plugin tool (`dingtalk_status`) | ✅ local plugin tool invoked |
+| HTTP Basic Auth + all endpoints | ✅ 200 authed / 401 without |
+
+## Known issues
+
+- **scholar-mcp `year_range` schema** (1.18.25+ stricter): the bundled
+  `scholar-mcp` used `z.tuple([...])` which produces an array-form JSON Schema
+  `items` that 1.18.25's strict validation rejects on startup
+  (`Tool 65 ... is not of type 'object','boolean'`). Fix: change its two
+  `z.tuple([z.number().int(), z.number().int()])` to
+  `z.array(z.number().int()).length(2)`. This only bites when running the same MCP
+  against 1.18.25.
+- **Shared DB columns**: some plugins (e.g. `codebuddy`) may write schema not present
+  in an older DB (e.g. `replacement_seq`). Irrelevant if the plugin is removed.
+- **`db` `LEFT()`**: Bun's bundled sqlite has no `LEFT()` string function; use
+  `substr()`.
 
 ## Building From Source
 
-### New: From-Source Chain (recommended)
-
-The modern build path (`from-source.yml`) drops the self-built Bun/WebKit/ICU entirely.
-It builds the official Bun 1.4 Android runtime and compiles `libopentui.so`
-**from opentui source** (the only native piece with no official Android prebuild),
-then bundles OpenCode for `bun-linux-aarch64-android`.
-
-```
-build-libopentui  ->  libopentui.so (aarch64-linux-android), compiled with Zig 0.15.2 + NDK r28
-build-opencode   ->  opencode standalone (official Bun 1.4 cross-compiled for Android)
-```
-
-Key implementation notes for `libopentui.so` on Android:
-- **Yoga C++** (added in opentui v0.4.5) is compiled with the **NDK `clang++`**
-  (`-fPIC -std=c++20`), *not* Zig — Zig 0.15.2 cannot cross-compile C++ against a
-  bionic libc it cannot provision. The resulting `.o` files are linked into the
-  Zig-built `.so`.
-- `yoga.zig` uses `std.heap.page_allocator` instead of `std.heap.c_allocator`
-  (which requires `linkLibC()` when building for a libc-less Android target).
-- The `.so` gets `NEEDED libc.so` + `NEEDED libc++_shared.so` via NDK stubs so
-  Android `dlopen()` can resolve `getauxval` etc.
+Prerequisites on the runner: Android NDK r28+, Zig 0.15.2, host Bun 1.4+.
 
 ```bash
-# Prerequisites: Android NDK r28+, Host Bun (for bundling)
 git clone https://github.com/kimcrowing/opencode-termux
 cd opencode-termux
-./scripts/build-opentui.sh        # Build libopentui.so (NDK clang++ + Zig)
-./scripts/build-opencode-android.ts  # Bundle opencode with official Bun for android
+source scripts/env.sh
+./scripts/build-opentui.sh             # build libopentui.so (NDK clang++ + Zig)
+bun ./scripts/build-opencode-android.ts # bundle opencode w/ official Bun for android
 ```
 
-It is driven automatically by `.github/workflows/from-source.yml`, which produces
-the `opencode-android` artifact (`opencode` + `libopentui.so`) per dispatch.
+Notes for `libopentui.so` on Android:
 
-## Compatibility Summary
+- **Yoga C++** (added in opentui v0.4.5) is compiled with the NDK `clang++`
+  (`-fPIC -std=c++20`), *not* Zig — Zig 0.15.2 cannot cross-compile C++ against a
+  bionic libc it cannot provision. The `.o` files are linked into the Zig-built `.so`.
+- `yoga.zig` uses `std.heap.page_allocator` rather than `c_allocator` (which would
+  require `linkLibC()` on a libc-less Android target).
+- The `.so` gets `NEEDED libc.so` + `NEEDED libc++_shared.so` via NDK stubs so Android
+  `dlopen()` can resolve `getauxval` etc.
 
-| Feature | Stock/upstream approach | This repository |
-|---------|------------------------|-----------------|
-| Android 10 support | ❌ | ✅ |
-| Built-in seccomp shim | ❌ | ✅ Built-in |
-| libtagfix.so | External asset | Built from source |
-| libseccomp_shim.so | ❌ Missing | ✅ Built-in |
-| OPENCODE_SERVER_PASSWORD | Broken | Fixed (process.env restore) |
-| MCP via npx | Broken | Fixed (node absolute path) |
-| Target Android | 11+ | **10+** |
+The whole pipeline is automated in `.github/workflows/from-source.yml`.
 
 ## License
 
-MIT License - same as upstream OpenCode.
+MIT — same as upstream OpenCode.
 
 ## Contributing
 
-This build maintains compatibility with upstream OpenCode while adding Android 10 support.
-PRs welcome for:
-- Android 9 support (seccomp policy may differ)
-- Additional MCP server integrations
-- Performance optimizations
-
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+PRs welcome for Android 9 support (seccomp policy differs), additional MCP/server
+integrations, and compatibility fixes. See
+[`docs/TERMUX_OPENCODE_PATCHES.md`](docs/TERMUX_OPENCODE_PATCHES.md) for the patch
+history.
