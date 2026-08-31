@@ -130,8 +130,23 @@ honour it.
 
 ## Verified against 1.18.25 (2026-08-31)
 
-Tested on this machine with the from-source 1.18.25 artifacts, installed as a side-by-side
-coexisting build:
+### Test environment
+
+| Item | Value |
+|------|-------|
+| Device | HONOR **PCT-AL10** (HWPCT) |
+| Manufacturer | HUAWEI / HONOR |
+| Android | **10** (API 29), `10.1.0.162C00` |
+| Security patch | 2020-08-01 |
+| Kernel | Linux 4.14.116 (aarch64) |
+| ABI | arm64-v8a |
+| Termux runtime | Node v24.18.0, git 2.55.0 |
+| OpenCode | **1.18.25** (from-source chain, action run `33370408745`, head `52676ba6`) |
+| Install | side-by-side dir `~/.opencode18/` + wrapper (`LD_PRELOAD libtagfix.so:libseccomp_shim.so`, `OPENTUI_LIB_PATH=.../libopentui.so`) |
+
+All checks below were run **on this Android 10 device** via the Termux shell.
+
+### Results
 
 | Area | Result |
 |------|--------|
