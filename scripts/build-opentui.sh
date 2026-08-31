@@ -87,7 +87,7 @@ if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_API:-}" ]; then
         yoga/debug/AssertFatal.cpp yoga/debug/Log.cpp yoga/event/event.cpp \
         yoga/node/LayoutResults.cpp yoga/node/Node.cpp; do
         stem="$(basename "$src" .cpp)"
-        "$CXX" -c -std=c++20 -fexceptions -frtti \
+        "$CXX" -c -fPIC -std=c++20 -fexceptions -frtti \
             -I"$YOGA_SRC" \
             -o "$OBJS_DIR/$stem.o" "$YOGA_SRC/$src"
     done
