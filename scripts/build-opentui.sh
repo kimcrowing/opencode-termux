@@ -57,6 +57,47 @@ if [ ! -f "$OPENTUI_ZIG_DIR/build.zig" ]; then
     exit 1
 fi
 
+# On Android, Zig cannot cross-compile C++ against a bionic libc it cannot
+# provision (Zig 0.15 has no android libc), so yoga's C++ is compiled with the
+# NDK's own clang++ (which sets up the correct bionic + libc++ include ordering
+# by construction) into .o files, then those objects are linked by Zig.
+# This is triggered by OPENTUI_YOGA_OBJS_DIR in build.zig's addYogaDependencies.
+if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_API:-}" ]; then
+    echo ">>> Precompiling yoga C++ with NDK clang++ ..."
+    YOGA_TAG="v3.2.1"   # must match .yoga dep in build.zig.zon
+    YOGA_SRC="$OPENTUI_SRC/../yoga-src-${YOGA_TAG}"
+    if [ ! -d "$YOGA_SRC/.git" ]; then
+        git clone --depth 1 --branch "$YOGA_TAG" https://github.com/facebook/yoga.git "$YOGA_SRC"
+    fi
+    OBJS_DIR="$OPENTUI_SRC/../yoga-objs"
+    mkdir -p "$OBJS_DIR"
+    NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    CXX="$NDK_BIN/aarch64-linux-android${ANDROID_API}-clang++"
+    if [ ! -x "$CXX" ]; then
+        echo "ERROR: NDK clang++ not found at $CXX" >&2
+        exit 1
+    fi
+    for src in \
+        yoga/YGConfig.cpp yoga/YGEnums.cpp yoga/YGNode.cpp \
+        yoga/YGNodeLayout.cpp yoga/YGNodeStyle.cpp yoga/YGPixelGrid.cpp \
+        yoga/YGValue.cpp yoga/algorithm/AbsoluteLayout.cpp \
+        yoga/algorithm/Baseline.cpp yoga/algorithm/Cache.cpp \
+        yoga/algorithm/CalculateLayout.cpp yoga/algorithm/FlexLine.cpp \
+        yoga/algorithm/PixelGrid.cpp yoga/config/Config.cpp \
+        yoga/debug/AssertFatal.cpp yoga/debug/Log.cpp yoga/event/event.cpp \
+        yoga/node/LayoutResults.cpp yoga/node/Node.cpp; do
+        stem="$(basename "$src" .cpp)"
+        "$CXX" -c -std=c++20 -fexceptions -frtti \
+            -I"$YOGA_SRC" \
+            -o "$OBJS_DIR/$stem.o" "$YOGA_SRC/$src"
+    done
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "OPENTUI_YOGA_OBJS_DIR=$OBJS_DIR" >> "$GITHUB_ENV"
+    fi
+    export OPENTUI_YOGA_OBJS_DIR="$OBJS_DIR"
+    echo "    yoga C++ objects -> $OBJS_DIR"
+fi
+
 echo ">>> Building with Zig (target: aarch64-linux-android)..."
 cd "$OPENTUI_ZIG_DIR"
 
