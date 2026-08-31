@@ -164,24 +164,6 @@ cd opencode-termux
 It is driven automatically by `.github/workflows/from-source.yml`, which produces
 the `opencode-android` artifact (`opencode` + `libopentui.so`) per dispatch.
 
-### Legacy: Self-built Bun chain
-
-The older path (`build.yml`) builds Bun/WebKit/ICU from source and is kept as a
-fallback.
-
-```bash
-./scripts/apply-patches.sh      # Apply patches to Bun/WebKit/Zig
-./scripts/build-bun.sh          # Build Android Bun
-./scripts/build-opentui.sh      # Build libopentui.so
-./scripts/build-opencode.sh     # Build opencode binary
-./scripts/make-packages.sh      # Create all package formats
-```
-
-**Requirements:**
-- Android NDK r28+
-- Host Bun (for bundling)
-- Linux build environment (CI/CD or WSL)
-
 ## Compatibility Summary
 
 | Feature | Stock/upstream approach | This repository |

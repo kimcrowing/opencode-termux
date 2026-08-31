@@ -22,7 +22,6 @@ export ANDROID_API="${ANDROID_API:-24}"
 # Official Bun android runtime tag to bundle with (embeds the bun-linux-*-android
 # runtime; --compile target string is bun-linux-aarch64-android).
 export BUN_VERSION="${BUN_VERSION:-1.4.0}"
-export BUN_TAG="bun-v${BUN_VERSION}"
 
 # Android NDK
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-/opt/android-ndk}"
@@ -45,23 +44,6 @@ export ANDROID_LD="${NDK_TOOLCHAIN}/bin/ld.lld"
 # Build directories (all relative to REPO_ROOT)
 export WORK_DIR="${WORK_DIR:-${REPO_ROOT}/build}"
 export OPENTUI_SRC="${WORK_DIR}/opentui-src"
-export OPENCODE_SRC="${WORK_DIR}/opencode-src"
-
-# ICU / deps prefix — consumed by build-icu.sh / build-webkit.sh and the
-# build.yml ICU job (deps-android/prefix cache + icu-prefix.tar artifact).
-export ICU_SRC="${WORK_DIR}/icu-src"
-export DEPS_PREFIX="${WORK_DIR}/deps-android/prefix"
-
-# Where the built android assets live and are reachable at runtime via
-# OTUI_ASSET_ROOT (see opentui platform/runtime-assets). Layout mirrors the
-# @opentui/core-linux-arm64 package: <dir>/libopentui.so.
-export OPENTUI_ANDROID_DIR="${WORK_DIR}/opentui-android"
-export OPENTUI_ANDROID_SO="${OPENTUI_ANDROID_DIR}/libopentui.so"
-
-export DIST_DIR="${WORK_DIR}/dist"
-
-# Number of parallel jobs (can be overridden for low-RAM machines)
-export JOBS="${JOBS:-$(nproc)}"
 
 echo "=== OpenCode Android Build Environment ==="
 echo "Repo root:     ${REPO_ROOT}"
@@ -71,6 +53,5 @@ echo "API Level:     ${ANDROID_API}"
 echo "Target:        ${ANDROID_TRIPLE}"
 echo "Bun runtime:   ${BUN_VERSION} (official --target=bun-linux-aarch64-android)"
 echo "OpenCode ver:  ${OPENCODE_VERSION}"
-echo "OpenCode ver:  ${OPENCODE_VERSION}"
-echo "Jobs:          ${JOBS}"
+echo "CPU:           $(nproc)"
 echo "==========================================="
