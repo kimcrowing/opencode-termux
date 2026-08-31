@@ -1,0 +1,177 @@
+name: Build OpenCode (from-source)
+
+# From-source chain: no self-built Bun/WebKit/ICU.
+#  - libopentui.so (android aarch64) is compiled from opentui source
+#    (NDK + Zig) because @opentui/core has NO official android prebuild.
+#  - opencode is bundled with official Bun (>= 1.4.0, which gained
+#    --target=bun-linux-aarch64-android) and shipped with our android
+#    libopentui.so, loaded at runtime via OTUI_ASSET_ROOT.
+#
+# Each stage is its own job writing a reusable artifact, so a failed stage
+# only restarts itself.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      opencode_version:
+        description: 'OpenCode version to build'
+        required: false
+        default: '1.18.25'
+
+concurrency:
+  group: from-source-opencode
+  cancel-in-progress: false
+
+env:
+  OPENCODE_VERSION: "1.18.25"
+  OPENTUI_VERSION: "v0.4.5"
+  ZIG_VERSION: "0.15.2"
+  ANDROID_API: "24"
+  # Official Bun version whose --target supports bun-linux-aarch64-android
+  # (android targets were added in Bun 1.4.0). Used BOTH as the host builder
+  # (x64 runner) and embedded as the runtime.
+  BUN_VERSION: "1.4.0"
+  ANDROID_NDK_VERSION: "28.1.13356709"
+
+jobs:
+  # ------------------------------------------------------------------
+  # libopentui.so (android aarch64) from opentui source (NDK + Zig).
+  # Reusable artifact consumed by the opencode job and by local installs.
+  # ------------------------------------------------------------------
+  build-libopentui:
+    name: Build libopentui.so (android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create work directory
+        run: |
+          echo "WORK_DIR=$RUNNER_TEMP/opencode-build" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/opencode-build"
+
+      - name: Install Android NDK (cached)
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: /tmp/android-ndk
+          key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Download Android NDK
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          wget -q "https://dl.google.com/android/repository/android-ndk-r28b-linux.zip" -O ndk.zip
+          unzip -q ndk.zip -d /tmp/
+          mv /tmp/android-ndk-r28b /tmp/android-ndk
+          rm ndk.zip
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> "$GITHUB_ENV"
+
+      - name: Set NDK env (cache)
+        if: steps.ndk.outputs.cache-hit == 'true'
+        run: |
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk" >> "$GITHUB_ENV"
+
+      - name: Verify NDK libc stub
+        run: |
+          ls -la "/tmp/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${ANDROID_API}/libc.so"
+
+      - name: Install Zig
+        run: |
+          ZIG_DIR="$RUNNER_TEMP/opencode-build/zig"
+          if [ ! -x "$ZIG_DIR/zig" ]; then
+            cd /tmp
+            wget -q "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -O zig.tar.xz
+            mkdir -p "$ZIG_DIR"
+            tar xf zig.tar.xz -C "$ZIG_DIR" --strip-components=1
+            rm zig.tar.xz
+          fi
+          echo "ZIG_BIN=$ZIG_DIR/zig" >> "$GITHUB_ENV"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+
+      - name: Build libopentui.so
+        run: |
+          ./scripts/build-opentui.sh
+
+      - name: Package libopentui.so
+        run: |
+          source scripts/env.sh
+          mkdir -p "$RUNNER_TEMP/opentui-artifact"
+          cp "$OPENTUI_SRC/packages/core/src/lib/aarch64-linux-android/libopentui.so" \
+             "$RUNNER_TEMP/opentui-artifact/libopentui.so"
+
+      - name: Upload libopentui.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libopentui
+          path: ${{ runner.temp }}/opentui-artifact/libopentui.so
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Bundle opencode for aarch64-android with official Bun, then stage the
+  # standalone + android libopentui.so + android bun runtime.
+  # ------------------------------------------------------------------
+  build-opencode:
+    name: Bundle OpenCode (android)
+    needs: build-libopentui
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install host Bun (android-capable)
+        run: |
+          curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}"
+          ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
+          bun --version
+
+      - name: Download libopentui (android)
+        uses: actions/download-artifact@v4
+        with:
+          name: libopentui
+          path: /tmp/opentui
+
+      - name: Clone opencode source
+        run: |
+          git clone --depth 1 --branch "v${OPENCODE_VERSION}" \
+            https://github.com/anomalyco/opencode.git "$RUNNER_TEMP/opencode-src"
+
+      - name: Install opencode deps
+        run: |
+          cd "$RUNNER_TEMP/opencode-src/packages/opencode"
+          bun install
+
+      - name: Bundle opencode for aarch64-android
+        run: |
+          set -euo pipefail
+          # opencode's build.ts allTargets[] has no android entry. Use our wrapper
+          # (from this fork), placed inside the opencode package so it resolves
+          # workspace deps + the web app dir, and pins Bun.build's compile target
+          # to bun-linux-aarch64-android.
+          cp scripts/build-opencode-android.ts \
+             "$RUNNER_TEMP/opencode-src/packages/opencode/script/build-opencode-android.ts"
+          cd "$RUNNER_TEMP/opencode-src/packages/opencode"
+          bun run script/build-opencode-android.ts --skip-embed-web-ui=false
+
+      - name: Stage output
+        run: |
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$STAGE"
+          cp /tmp/opentui/libopentui.so "$STAGE/libopentui.so"
+          cp "$RUNNER_TEMP/opencode-src/packages/opencode/dist/opencode-linux-aarch64-android/bin/opencode" "$STAGE/opencode" || \
+          cp "$(find "$RUNNER_TEMP/opencode-src/packages/opencode/dist" -name opencode -type f | head -1)" "$STAGE/opencode"
+          ls -la "$STAGE"
+
+      - name: Upload android opencode bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android
+          path: ${{ runner.temp }}/stage/*
+          if-no-files-found: error
