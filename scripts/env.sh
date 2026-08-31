@@ -47,6 +47,11 @@ export WORK_DIR="${WORK_DIR:-${REPO_ROOT}/build}"
 export OPENTUI_SRC="${WORK_DIR}/opentui-src"
 export OPENCODE_SRC="${WORK_DIR}/opencode-src"
 
+# ICU / deps prefix — consumed by build-icu.sh / build-webkit.sh and the
+# build.yml ICU job (deps-android/prefix cache + icu-prefix.tar artifact).
+export ICU_SRC="${WORK_DIR}/icu-src"
+export DEPS_PREFIX="${WORK_DIR}/deps-android/prefix"
+
 # Where the built android assets live and are reachable at runtime via
 # OTUI_ASSET_ROOT (see opentui platform/runtime-assets). Layout mirrors the
 # @opentui/core-linux-arm64 package: <dir>/libopentui.so.
