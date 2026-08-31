@@ -1,13 +1,12 @@
 diff --git a/packages/core/src/zig/build.zig b/packages/core/src/zig/build.zig
-index 0c82ba3..f9f032a 100644
+index 0c82ba3..14ed871 100644
 --- a/packages/core/src/zig/build.zig
 +++ b/packages/core/src/zig/build.zig
-@@ -153,7 +153,28 @@ fn addMiniaudioShim(
+@@ -153,7 +153,26 @@ fn addMiniaudioShim(
      };
  
      artifact.addIncludePath(b.path("."));
 -    artifact.linkLibC();
-+
 +    // Zig 0.15.2 does not ship an Android (bionic) libc, so linkLibC() fails
 +    // with "unable to provide libc for target ...android". linkLibC() would also
 +    // provide no bionic headers. Skip it for Android and instead add the NDK
@@ -28,11 +27,10 @@ index 0c82ba3..f9f032a 100644
 +    } else {
 +        artifact.linkLibC();
 +    }
-+
      artifact.addCSourceFile(.{
          .file = b.path("miniaudio_shim.c"),
          .flags = c_flags,
-@@ -190,17 +211,28 @@ fn addNativeAudioDependencies(
+@@ -190,17 +209,28 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, artifact, macos_sdk_path.?),
          .linux => {
@@ -65,7 +63,25 @@ index 0c82ba3..f9f032a 100644
      artifact.addIncludePath(yoga_dep.path(""));
      artifact.addCSourceFiles(.{
          .root = yoga_dep.path(""),
-@@ -492,7 +524,37 @@ fn buildTarget(
+@@ -320,7 +350,7 @@ pub fn build(b: *std.Build) void {
+         std.process.exit(1);
+     }
+     addNativeAudioDependencies(b, test_artifact, native_target, macos_sdk_path);
+-    addYogaDependencies(b, test_artifact);
++    addYogaDependencies(b, test_artifact, native_target);
+ 
+     const run_test = b.addRunArtifact(test_artifact);
+     test_step.dependOn(&run_test.step);
+@@ -360,7 +390,7 @@ pub fn build(b: *std.Build) void {
+         std.process.exit(1);
+     }
+     addNativeAudioDependencies(b, bench_ffi_lib, native_target, macos_sdk_path);
+-    addYogaDependencies(b, bench_ffi_lib);
++    addYogaDependencies(b, bench_ffi_lib, native_target);
+     const install_bench_ffi = b.addInstallArtifact(bench_ffi_lib, .{});
+     bench_ffi_step.dependOn(&install_bench_ffi.step);
+     bench_step.dependOn(bench_ffi_step);
+@@ -492,7 +522,37 @@ fn buildTarget(
      });
  
      addNativeAudioDependencies(b, lib, target, macos_sdk_path);
