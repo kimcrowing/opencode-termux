@@ -20,15 +20,24 @@
 
 set -euo pipefail
 
-# Resolve the install directory: alongside this script's parent, or override.
-INSTALL_DIR="${OPENCODE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Resolve the install directory: the script's own directory (i.e. the unpacked
+# bundle root) unless overridden with OPENCODE_HOME.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="${OPENCODE_HOME:-$SCRIPT_DIR}"
 
-BIN="$INSTALL_DIR/opencode2"
+# The bundle keeps the binary under bin/; accept a legacy top-level layout too.
+BIN=""
+for candidate in "$INSTALL_DIR/bin/opencode2" "$INSTALL_DIR/opencode2"; do
+    if [ -x "$candidate" ]; then
+        BIN="$candidate"
+        break
+    fi
+done
 LIB_DIR="$INSTALL_DIR/lib"
 ASSET_ROOT="${OTUI_ASSET_ROOT:-$INSTALL_DIR/otui-assets}"
 
-if [ ! -x "$BIN" ]; then
-    echo "ERROR: opencode2 not found or not executable at $BIN" >&2
+if [ -z "$BIN" ]; then
+    echo "ERROR: opencode2 not found or not executable under $INSTALL_DIR" >&2
     exit 1
 fi
 
