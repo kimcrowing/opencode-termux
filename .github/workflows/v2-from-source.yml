@@ -547,6 +547,14 @@ jobs:
           chmod +x tests/v2-plugin/verify-xcpquery.sh
           ./tests/v2-plugin/verify-xcpquery.sh "$BIN"
 
+      - name: Run dingtalk v2 migration verification
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
+          chmod +x tests/v2-plugin/verify-dingtalk.sh
+          ./tests/v2-plugin/verify-dingtalk.sh "$BIN"
+
   # ---------------------------------------------------------------------------
   # Stage 4: bundle
   #
