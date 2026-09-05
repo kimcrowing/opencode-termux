@@ -75,8 +75,6 @@ Directory layout:
 | `src/seccomp_shim.c` | Source of `libseccomp_shim.so` (converts Android 10 seccomp `SIGSYS` to `ENOSYS`). |
 | `patches/opentui/*.patch` | Android fixes applied to opentui source (libc link, platform-name normalization for v0.4.5). |
 | `termux/start-opencode.sh` | Headless server launcher (`opencode serve`, sets `OPENCODE_SERVER_PASSWORD` + `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2`). |
-| `docs/TERMUX_OPENCODE_PATCHES.md` | Patch/issue history. |
-| `cmake/` | Legacy self-built-chain toolchain (kept for reference; not used by from-source). |
 
 ## Android compat libraries
 
@@ -251,6 +249,4 @@ MIT — same as upstream OpenCode.
 ## Contributing
 
 PRs welcome for Android 9 support (seccomp policy differs), additional MCP/server
-integrations, and compatibility fixes. See
-[`docs/TERMUX_OPENCODE_PATCHES.md`](docs/TERMUX_OPENCODE_PATCHES.md) for the patch
-history.
+integrations, and compatibility fixes.

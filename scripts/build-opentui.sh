@@ -29,26 +29,14 @@ fi
 # Apply Android libc linking patch
 # Without this patch, the .so won't have NEEDED: libc.so, and Android's
 # dlopen() will fail because it can't resolve symbols like getauxval.
-# The v0.4.5 patch is line-adapted for OPENTUI_VERSION=v0.4.5; the generic
-# one targets older tags (0.3.4). Pick whichever applies cleanly.
-OPENTUI_PATCH=""
-for cand in \
-    "$REPO_ROOT/patches/opentui/android-libc-link-0.4.5.patch" \
-    "$REPO_ROOT/patches/opentui/android-libc-link.patch"; do
-    if [ -f "$cand" ]; then
-        if (cd "$OPENTUI_SRC" && git apply --check "$cand" 2>/dev/null); then
-            OPENTUI_PATCH="$cand"
-            break
-        fi
-    fi
-done
-if [ -n "$OPENTUI_PATCH" ]; then
-    echo ">>> Applying opentui Android patch: $(basename "$OPENTUI_PATCH")"
-    (cd "$OPENTUI_SRC" && git apply "$OPENTUI_PATCH")
-    echo "    Patch applied successfully"
-else
-    echo ">>> No opentui Android patch applies to OPENTUI_VERSION=${OPENTUI_VERSION}; proceeding unpatch (may fail on bionic libc)"
+OPENTUI_PATCH="$REPO_ROOT/patches/opentui/android-libc-link-0.4.5.patch"
+if [ ! -f "$OPENTUI_PATCH" ]; then
+    echo "ERROR: opentui Android patch not found at $OPENTUI_PATCH" >&2
+    exit 1
 fi
+echo ">>> Applying opentui Android patch: $(basename "$OPENTUI_PATCH")"
+(cd "$OPENTUI_SRC" && git apply "$OPENTUI_PATCH")
+echo "    Patch applied successfully"
 
 OPENTUI_ZIG_DIR="$OPENTUI_SRC/packages/core/src/zig"
 

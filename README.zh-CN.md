@@ -70,8 +70,6 @@ build-opencode  ->  opencode（官方 Bun 1.4 交叉编译到 Android）
 | `src/seccomp_shim.c` | `libseccomp_shim.so` 的源码（将 Android 10 的 seccomp `SIGSYS` 转为 `ENOSYS`）。 |
 | `patches/opentui/*.patch` | 应用到 opentui 源码的 Android 修复（libc 链接、v0.4.5 平台名归一化）。 |
 | `termux/start-opencode.sh` | 无头服务器启动器（`opencode serve`，设置 `OPENCODE_SERVER_PASSWORD` 与 `BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2`）。 |
-| `docs/TERMUX_OPENCODE_PATCHES.md` | 补丁/问题历史。 |
-| `cmake/` | 已弃用的自建链工具链（仅供参考，from-source 不使用）。 |
 
 ## Android 兼容库
 
@@ -237,7 +235,6 @@ MIT —— 与上游 OpenCode 相同。
 ## 贡献
 
 欢迎针对 Android 9 支持（seccomp 策略不同）、更多 MCP/服务器集成及兼容性修复提交 PR。
-补丁历史参见 [`docs/TERMUX_OPENCODE_PATCHES.md`](docs/TERMUX_OPENCODE_PATCHES.md)。
 
 ## 发布说明（Release v1.18.25）
 
