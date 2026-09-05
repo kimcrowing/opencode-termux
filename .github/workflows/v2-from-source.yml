@@ -434,7 +434,13 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: opencode2-android
-          path: build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android
+          # Upload the `bin/` directory itself so downloading to `package/bin`
+          # lands opencode2 and .built-sha straight at that path (uploading
+          # the parent dist dir would nest them one level deeper).
+          path: build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android/bin
+          # .built-sha starts with a dot; upload-artifact skips hidden files
+          # unless explicitly included.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
