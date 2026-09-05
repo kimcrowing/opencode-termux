@@ -1,0 +1,10 @@
+const fs = require('fs');
+const vm = require('vm');
+const code = fs.readFileSync(__dirname + '/des.js', 'utf8');
+const ctx = {console};
+vm.createContext(ctx);
+vm.runInContext(code, ctx);
+const strEnc = vm.runInContext('strEnc', ctx);
+const pwd = process.argv[2];
+const rk = process.argv[3];
+process.stdout.write(strEnc(pwd, rk, '', ''));

@@ -479,6 +479,7 @@ jobs:
             opencode-src-verify-${{ steps.ref.outputs.ref }}-
 
       - name: Clone upstream opencode (v2 / beta)
+        id: sha
         run: |
           set -euo pipefail
           REF="${{ steps.ref.outputs.ref }}"
@@ -492,14 +493,19 @@ jobs:
               https://github.com/anomalyco/opencode.git build/opencode-src
           fi
           SHA="$(git -C build/opencode-src rev-parse HEAD)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "::notice::upstream HEAD: $SHA"
 
+      # The install must be tied to the upstream commit, not only to bun.lock:
+      # a republished tarball (same version, new export map) keeps the lock hash
+      # stable while the cached node_modules go stale, which previously broke the
+      # linux build with `preload not found "@opentui/solid/preload"`.
       - name: Cache bun install
         id: cache-install
         uses: actions/cache@v5
         with:
           path: build/opencode-src/node_modules
-          key: v2-verify-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+          key: v2-verify-install-${{ runner.os }}-${{ steps.sha.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}
 
       - name: Install dependencies
         if: steps.cache-install.outputs.cache-hit != 'true'
@@ -532,6 +538,14 @@ jobs:
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
           chmod +x tests/v2-plugin/verify-uyanip.sh
           ./tests/v2-plugin/verify-uyanip.sh "$BIN"
+
+      - name: Run xcpquery v2 migration verification
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
+          chmod +x tests/v2-plugin/verify-xcpquery.sh
+          ./tests/v2-plugin/verify-xcpquery.sh "$BIN"
 
   # ---------------------------------------------------------------------------
   # Stage 4: bundle
