@@ -1,0 +1,178 @@
+diff --git a/packages/native/build.zig b/packages/native/build.zig
+index b226da7..0cc325a 100644
+--- a/packages/native/build.zig
++++ b/packages/native/build.zig
+@@ -186,13 +186,82 @@ fn addMiniaudioShim(
+     };
+ 
+     module.addIncludePath(b.path("src"));
+-    module.link_libc = true;
++    // Zig ships no Android (bionic) libc, so link_libc = true fails with
++    // "unable to provide libc for target ...android" and would also give us no
++    // bionic headers. On Android we instead add the NDK sysroot bionic headers
++    // (generic usr/include plus the arch-specific usr/include/<triple> that
++    // holds asm/, android/, etc.) as system include paths so @cImport of
++    // miniaudio resolves pthread.h, asm/types.h and friends. The libc.so stub
++    // itself is linked in buildTarget.
++    if (isAndroidTarget(target)) {
++        addAndroidBionicHeaders(b, module);
++    } else {
++        module.link_libc = true;
++    }
+     module.addCSourceFile(.{
+         .file = b.path("src/miniaudio_shim.c"),
+         .flags = c_flags,
+     });
+ }
+ 
++/// Android is "linux" with an android ABI, not its own os tag.
++fn isAndroidTarget(target: std.Build.ResolvedTarget) bool {
++    return target.result.os.tag == .linux and
++        (target.result.abi == .android or target.result.abi == .androideabi);
++}
++
++/// Expose the NDK sysroot bionic headers to @cImport. Zig cannot provision
++/// bionic itself, but the NDK's headers are a plain filesystem away.
++fn addAndroidBionicHeaders(b: *std.Build, module: *std.Build.Module) void {
++    const ndk_home = std.process.getEnvVarOwned(b.allocator, "ANDROID_NDK_HOME") catch {
++        std.debug.print("WARNING: ANDROID_NDK_HOME not set; bionic libc headers unavailable\n", .{});
++        return;
++    };
++    const sysroot = b.pathJoin(&.{ ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "sysroot" });
++    const triple = "aarch64-linux-android";
++    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
++    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
++}
++
++/// Path to the NDK's per-arch lib directory holding the libc.so API stubs and
++/// libc++_shared.so.
++fn androidArchLibDir(b: *std.Build, ndk_home: []const u8) []const u8 {
++    return b.pathJoin(&.{
++        ndk_home,
++        "toolchains",
++        "llvm",
++        "prebuilt",
++        "linux-x86_64",
++        "sysroot",
++        "usr",
++        "lib",
++        "aarch64-linux-android",
++    });
++}
++
++/// Give the shared library NEEDED entries for libc.so and libc++_shared.so.
++///
++/// The libc.so stub lives per-API-level (.../<api>/libc.so) while
++/// libc++_shared.so sits directly in the arch directory. Linking them as object
++/// files produces the NEEDED entries Android's linker needs without asking Zig
++/// to provision a bionic libc.
++fn linkAndroidStubs(b: *std.Build, lib: *std.Build.Step.Compile) void {
++    const ndk_home = std.process.getEnvVarOwned(b.allocator, "ANDROID_NDK_HOME") catch {
++        std.debug.print("WARNING: ANDROID_NDK_HOME not set; cannot link bionic stubs\n", .{});
++        return;
++    };
++    const arch_lib = androidArchLibDir(b, ndk_home);
++    const api = std.process.getEnvVarOwned(b.allocator, "ANDROID_API") catch |err| blk: {
++        if (err == error.EnvironmentVariableNotFound) {
++            break :blk b.dupe("24");
++        } else |other| return other;
++    };
++    const libc_stub = b.pathJoin(&.{ arch_lib, api, "libc.so" });
++    const libcpp = b.pathJoin(&.{ arch_lib, "libc++_shared.so" });
++    lib.addObjectFile(.{ .cwd_relative = libc_stub });
++    lib.addObjectFile(.{ .cwd_relative = libcpp });
++}
++
+ fn appendCFlags(b: *std.Build, base: []const []const u8, extra: []const []const u8) []const []const u8 {
+     const flags = b.allocator.alloc([]const u8, base.len + extra.len) catch @panic("OOM");
+     @memcpy(flags[0..base.len], base);
+@@ -366,17 +435,42 @@ fn addNativeAudioDependencies(
+     switch (target.result.os.tag) {
+         .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
+         .linux => {
+-            module.linkSystemLibrary("dl", .{});
+-            module.linkSystemLibrary("pthread", .{});
+-            module.linkSystemLibrary("m", .{});
++            // Bionic merges libdl and libpthread into libc, so there is no
++            // separate library for Zig's paths_first search to find; asking for
++            // them makes the link fail. libm is likewise part of bionic's libc.
++            if (!isAndroidTarget(target)) {
++                module.linkSystemLibrary("dl", .{});
++                module.linkSystemLibrary("pthread", .{});
++                module.linkSystemLibrary("m", .{});
++            }
+         },
+         else => {},
+     }
+ }
+ 
+ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
++    addYogaDependenciesTarget(b, module, null);
++}
++
++/// `target` is null for modules that are only ever built natively (tests,
++/// benchmarks, the exported zig module). Those keep the plain upstream path.
++fn addYogaDependenciesTarget(
++    b: *std.Build,
++    module: *std.Build.Module,
++    target: ?std.Build.ResolvedTarget,
++) void {
+     const yoga_dep = b.dependency("yoga", .{});
+ 
++    // Android has no separate libc++ that Zig can provide (provisioning it
++    // would pull in bionic libc and fail). libc++_shared.so is linked from the
++    // NDK sysroot in buildTarget instead.
++    if (target) |t| {
++        if (isAndroidTarget(t)) {
++            addAndroidYogaObjects(b, module);
++            return;
++        }
++    }
++
+     module.link_libcpp = true;
+     module.addIncludePath(yoga_dep.path(""));
+     module.addCSourceFiles(.{
+@@ -386,6 +480,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
+     });
+ }
+ 
++/// Link prebuilt yoga objects instead of compiling the C++ here.
++///
++/// Zig cannot cross-compile C++ against a bionic libc it cannot provision, so
++/// scripts/build-opentui.sh compiles the yoga C++ with the NDK's own clang++
++/// (which gets the bionic + libc++ include ordering right by construction). The
++/// resulting Foo.o files, one per Foo.cpp, live in OPENTUI_YOGA_OBJS_DIR.
++fn addAndroidYogaObjects(b: *std.Build, module: *std.Build.Module) void {
++    module.addIncludePath(b.dependency("yoga", .{}).path(""));
++    const objs_dir = std.process.getEnvVarOwned(b.allocator, "OPENTUI_YOGA_OBJS_DIR") catch {
++        std.debug.print("WARNING: OPENTUI_YOGA_OBJS_DIR not set; yoga C++ will not be linked!\n", .{});
++        return;
++    };
++    for (YOGA_CXX_SOURCES) |src| {
++        const base = std.fs.path.basename(src);
++        const stem = base[0 .. base.len - 4]; // strip ".cpp"
++        module.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ objs_dir, b.fmt("{s}.o", .{stem}) }) });
++    }
++}
++
+ fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
+     switch (target.result.cpu.arch) {
+         .x86_64, .aarch64 => {},
+@@ -748,7 +861,16 @@ fn buildTarget(
+     if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
+ 
+     addNativeAudioDependencies(b, module, target, macos_sdk_path);
+-    addYogaDependencies(b, module);
++    addYogaDependenciesTarget(b, module, target);
++
++    // On Android the .so needs NEEDED libc.so so dlopen() can resolve symbols
++    // like getauxval, and NEEDED libc++_shared.so for yoga (link_libcpp is
++    // skipped above). Zig bundles neither for Android, so we add the NDK
++    // sysroot stubs directly as link inputs - addObjectFile records the NEEDED
++    // entry without triggering Zig's native libc provisioning.
++    if (isAndroidTarget(target)) {
++        linkAndroidStubs(b, lib);
++    }
+ 
+     const install_dir = b.addInstallArtifact(lib, .{
+         .dest_dir = .{

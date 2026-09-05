@@ -1,0 +1,166 @@
+name: v2 from-source
+
+# Builds OpenCode v2 (`opencode2`) for Android aarch64.
+#
+# Design constraints this workflow is built around:
+#   * GitHub's free runners are 4 vCPU / ~16 GB. A monolithic build blows that
+#     budget, so every expensive stage is its own job with its own cache.
+#   * Each job restores only the artifacts it needs and uploads only what the
+#     next job consumes, so a failure in a late stage does not force a rebuild
+#     of an early one.
+#   * Cache keys are content-hashed, so re-running after a no-op change is
+#     nearly free, and editing one script only invalidates that stage.
+#
+# Stages:
+#   1. build-libopentui  -> libopentui.so (Zig + NDK, the memory-heavy step)
+#   2. build-opencode2   -> opencode2 binary (Bun bundle for android)
+#   3. package           -> shippable archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref to build (branch, tag, or SHA)"
+        required: false
+        default: "beta"
+        type: string
+      skip_web_ui:
+        description: "Skip building the embedded web UI (faster, TUI-only binary)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Single source of truth for tool versions. Keep in sync with scripts/env.sh.
+  BUN_VERSION: "1.4.1"
+  ZIG_VERSION: "0.16.0"
+  OPENTUI_VERSION: "v0.5.10"
+  ANDROID_API: "24"
+  ANDROID_NDK_VERSION: "r28c"
+  # Zig's own parallelism. The native link is the memory peak of the whole
+  # build; keeping this low is what stops the runner from OOM-killing.
+  ZIG_JOBS: "2"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1: libopentui.so
+  #
+  # The heaviest native step and the one most likely to break when opentui
+  # changes, so it is isolated. Produces the OTUI_ASSET_ROOT tree that lets
+  # @opentui/core load a native library on a platform it has no prebuild for.
+  # ---------------------------------------------------------------------------
+  build-libopentui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache libopentui.so
+        # The expensive output. Keyed on everything that affects it: the tag,
+        # the patch contents, the toolchain versions and the API level.
+        id: cache-so
+        uses: actions/cache@v4
+        with:
+          path: build/otui-assets
+          key: libopentui-${{ env.OPENTUI_VERSION }}-zig${{ env.ZIG_VERSION }}-${{ env.ANDROID_NDK_VERSION }}-api${{ env.ANDROID_API }}-${{ hashFiles('patches/opentui/*.patch', 'scripts/build-opentui.sh') }}
+
+      - name: Cache Zig toolchain
+        if: steps.cache-so.outputs.cache-hit != 'true'
+        id: cache-zig
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.os }}-${{ env.ZIG_VERSION }}
+
+      - name: Install Zig
+        # Zig 0.16 renamed its tarballs to zig-<arch>-<os>-<version>.tar.xz
+        # (0.15 and earlier used zig-<os>-<arch>-<version>).
+        if: steps.cache-so.outputs.cache-hit != 'true' && steps.cache-zig.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/zig
+          cd ~/.cache/zig
+          curl -fsSL --max-time 600 -o zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          tar -xf zig.tar.xz
+          rm zig.tar.xz
+          # The tarball root is zig-x86_64-linux-<version>/; normalise to zig/
+          mv zig-x86_64-linux-${ZIG_VERSION} zig
+          ~/.cache/zig/zig/zig version
+
+      - name: Cache Android NDK
+        if: steps.cache-so.outputs.cache-hit != 'true'
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: /opt/android-ndk
+          key: ndk-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Install Android NDK
+        if: steps.cache-so.outputs.cache-hit != 'true' && steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -fsSL --max-time 900 -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+          unzip -q ndk.zip
+          rm ndk.zip
+          sudo mkdir -p /opt/android-ndk
+          sudo cp -a android-ndk-${ANDROID_NDK_VERSION}/. /opt/android-ndk/
+          sudo chmod -R +rX /opt/android-ndk
+          /opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang++ --version
+
+      - name: Cache opentui + yoga sources
+        if: steps.cache-so.outputs.cache-hit != 'true'
+        # Sources are large and slow to clone. Keyed by version so bumping
+        # OPENTUI_VERSION naturally invalidates them.
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/opentui-src
+            build/yoga-src
+          key: otui-src-${{ env.OPENTUI_VERSION }}
+
+      - name: Build libopentui.so
+        if: steps.cache-so.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: /opt/android-ndk
+          OPENTUI_VERSION: ${{ env.OPENTUI_VERSION }}
+          ZIG_JOBS: ${{ env.ZIG_JOBS }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cache/zig/zig:$PATH"
+          chmod +x scripts/build-opentui.sh
+          ./scripts/build-opentui.sh
+
+      - name: Verify libopentui.so
+        env:
+          ANDROID_NDK_HOME: /opt/android-ndk
+        run: |
+          set -euo pipefail
+          SO="build/otui-assets/@opentui/core-linux-arm64/libopentui.so"
+          test -f "$SO" || { echo "::error::libopentui.so missing at $SO"; exit 1; }
+          echo "== file =="
+          file "$SO"
+          echo "== NEEDED =="
+          readelf -d "$SO" | grep NEEDED || echo "(none)"
+          readelf -d "$SO" | grep -q "NEEDED.*libc.so" \
+            || { echo "::error::libopentui.so has no NEEDED libc.so"; exit 1; }
+          # Must be an aarch64 shared object, not a host build.
+          readelf -h "$SO" | grep -q "AArch64" \
+            || { echo "::error::libopentui.so is not AArch64"; exit 1; }
+          echo "::notice::libopentui.so OK ($(du -h "$SO" | cut -f1))"
+
+      - name: Upload libopentui.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libopentui-android
+          path: build/otui-assets
+          if-no-files-found: error
+          retention-days: 7
