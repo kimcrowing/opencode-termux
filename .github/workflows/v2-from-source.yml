@@ -445,6 +445,87 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Stage 5: v2 plugin verification on a native Linux binary
+  #
+  # Before migrating the v1 plugins (tests/v2-plugin/hello) to the v2 API we must
+  # prove the v2 plugin machinery works end to end on a real binary. This job is
+  # independent of the Android pipeline: it builds the upstream v2 CLI for
+  # linux-x64 (no android patches involved) and runs it, then asserts a directory
+  # plugin gets its setup() called (sentinel files) and shows up active in
+  # /api/plugin. Native re-compilation is ~2-4 min; the cheap thing to miss is a
+  # broken plugin load, so skipping the android parts is fine.
+  # ---------------------------------------------------------------------------
+  verify-v2-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Resolve upstream ref
+        id: ref
+        run: echo "ref=${{ inputs.upstream_ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache upstream source
+        id: cache-upstream
+        uses: actions/cache@v5
+        with:
+          path: build/opencode-src
+          key: opencode-src-verify-${{ steps.ref.outputs.ref }}-${{ github.run_id }}
+          restore-keys: |
+            opencode-src-verify-${{ steps.ref.outputs.ref }}-
+
+      - name: Clone upstream opencode (v2 / beta)
+        run: |
+          set -euo pipefail
+          REF="${{ steps.ref.outputs.ref }}"
+          if [ -d build/opencode-src/.git ]; then
+            echo "upstream checkout exists, refreshing"
+            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
+            git -C build/opencode-src checkout --force FETCH_HEAD || true
+          else
+            mkdir -p build
+            git clone --depth 1 --branch "$REF" \
+              https://github.com/anomalyco/opencode.git build/opencode-src
+          fi
+          SHA="$(git -C build/opencode-src rev-parse HEAD)"
+          echo "::notice::upstream HEAD: $SHA"
+
+      - name: Cache bun install
+        id: cache-install
+        uses: actions/cache@v5
+        with:
+          path: build/opencode-src/node_modules
+          key: v2-verify-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache-install.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd build/opencode-src
+          bun install --os="*" --cpu="*"
+
+      - name: Build native linux-x64 opencode2
+        run: |
+          set -euo pipefail
+          cd build/opencode-src/packages/cli
+          bun run script/build.ts \
+            --target=opencode2-linux-x64 \
+            --skip-web-ui \
+            --skip-install
+
+      - name: Run v2 plugin verification
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; ls -R "$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist" || true; exit 1; }
+          chmod +x tests/v2-plugin/verify.sh
+          ./tests/v2-plugin/verify.sh "$BIN"
+
+  # ---------------------------------------------------------------------------
   # Stage 4: bundle
   #
   # Assembles the shippable set: binary + native runtime assets + compat libs.
