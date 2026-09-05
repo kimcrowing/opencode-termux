@@ -1071,18 +1071,20 @@ export default {
       }
     }
 
-    const registeredIds = [];
+    // NOTE: the transform callback runs inside the plugin host worker (its own
+    // global scope), so any side effects / closures captured here are NOT seen
+    // after `await` returns in this setup() scope. Sentinel + ID capture must
+    // therefore happen inside the callback, not here.
     const registration = await ctx.tool.transform((editor) => {
       for (const t of TOOLS) {
         editor.add(t);
       }
-      registeredIds.push(...editor.list().map(({ id }) => id));
+      const ids = editor.list().map(({ id }) => id);
+      const sentinel = process.env.UYANIP_VERIFY_SENTINEL;
+      if (sentinel) {
+        fs.writeFileSync(sentinel, JSON.stringify(ids, null, 2), "utf-8");
+      }
     });
-
-    const sentinel = process.env.UYANIP_VERIFY_SENTINEL;
-    if (sentinel) {
-      fs.writeFileSync(sentinel, JSON.stringify(registeredIds, null, 2), "utf-8");
-    }
 
     return async () => {
       await registration.dispose();
