@@ -1,5 +1,5 @@
 diff --git a/packages/native/build.zig b/packages/native/build.zig
-index b226da7..117c021 100644
+index b226da7..8482042 100644
 --- a/packages/native/build.zig
 +++ b/packages/native/build.zig
 @@ -186,13 +186,110 @@ fn addMiniaudioShim(
@@ -186,8 +186,24 @@ index b226da7..117c021 100644
  fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
      switch (target.result.cpu.arch) {
          .x86_64, .aarch64 => {},
-@@ -411,6 +552,9 @@ fn addTranslatedCImports(
+@@ -405,12 +546,25 @@ fn addTranslatedCImports(
+     optimize: std.builtin.OptimizeMode,
+     target: std.Build.ResolvedTarget,
+ ) void {
++    // Zig 0.16 (and 0.15) ships no Android/bionic libc at all (lib/libc/include
++    // has no aarch64-linux-android dir), so a translate-c module with its default
++    // link_libc = true gets propagated into the final link by createModule() and
++    // makes Zig answer `-lc` with "unable to provide libc for target ...android"
++    // (compile graph walks every dependency's modules for link_libc, see
++    // Build/Step/Compile.zig). The bionic headers are fed via NDK sysroot
++    // -isystem paths and libc.so/libc++_shared.so are linked in buildTarget as
++    // plain object files, so -lc must be suppressed here for Android.
++    const translate_link_libc = !isAndroidTarget(target);
+     const miniaudio_translate = b.addTranslateC(.{
+         .root_source_file = b.path("src/vendor/miniaudio/miniaudio.h"),
+         .target = target,
          .optimize = optimize,
++        .link_libc = translate_link_libc,
      });
      miniaudio_translate.addIncludePath(b.path("src"));
 +    if (isAndroidTarget(target)) {
@@ -196,8 +212,11 @@ index b226da7..117c021 100644
      module.addImport("miniaudio", miniaudio_translate.createModule());
  
      const yoga_dep = b.dependency("yoga", .{});
-@@ -420,6 +564,9 @@ fn addTranslatedCImports(
+@@ -418,8 +572,12 @@ fn addTranslatedCImports(
+         .root_source_file = yoga_dep.path("yoga/Yoga.h"),
+         .target = target,
          .optimize = optimize,
++        .link_libc = translate_link_libc,
      });
      yoga_translate.addIncludePath(yoga_dep.path(""));
 +    if (isAndroidTarget(target)) {
@@ -206,7 +225,7 @@ index b226da7..117c021 100644
      module.addImport("yoga", yoga_translate.createModule());
  }
  
-@@ -748,7 +895,16 @@ fn buildTarget(
+@@ -748,7 +906,16 @@ fn buildTarget(
      if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
  
      addNativeAudioDependencies(b, module, target, macos_sdk_path);
