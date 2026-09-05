@@ -156,7 +156,30 @@ fi
 echo "    yoga C++ objects -> $YOGA_OBJS (${#YOGA_SOURCES[@]} objects)"
 
 # ---------------------------------------------------------------------------
-# 6. Build with Zig
+# 6. Write the Zig libc file pointing at the NDK bionic sysroot
+# ---------------------------------------------------------------------------
+# Zig bundles no Android libc; without `--libc file` the root module's
+# link_libc=true (needed for std/c.zig extern "c" bindings) fails with "unable
+# to provide libc for target ...android". The file tells Zig where bionic's
+# headers (crt include_dir/sys_include_dir) and per-API stub directory
+# (crt_dir, holding crtbegin_so.o + libc.so) live. Format:
+#   include_dir     directory containing stdlib.h
+#   sys_include_dir directory containing sys/errno.h (bionic: same as include)
+#   crt_dir         directory containing crt1.o / crtbegin_so.o / libc.so
+ANDROID_ZIG_LIBC_FILE="${WORK_DIR}/android-bionic-libc.txt"
+{
+    echo "include_dir=${NDK_SYSROOT}/usr/include/"
+    echo "sys_include_dir=${NDK_SYSROOT}/usr/include/"
+    echo "crt_dir=${NDK_SYSROOT}/usr/lib/${ANDROID_TRIPLE}/${ANDROID_API}/"
+    echo "msvc_lib_dir="
+    echo "kernel32_lib_dir="
+    echo "gcc_dir="
+} > "$ANDROID_ZIG_LIBC_FILE"
+export ANDROID_ZIG_LIBC_FILE
+echo ">>> Zig libc file -> $ANDROID_ZIG_LIBC_FILE"
+
+# ---------------------------------------------------------------------------
+# 7. Build with Zig
 # ---------------------------------------------------------------------------
 # -Dlibrary-target accepts an arbitrary triple; unrecognised targets are treated
 # as custom (build.zig falls through SUPPORTED_TARGETS to buildTarget directly),
@@ -192,7 +215,7 @@ if [ -z "$LIBOPENTUI" ] || [ ! -f "$LIBOPENTUI" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Stage into the OTUI_ASSET_ROOT layout
+# 8. Stage into the OTUI_ASSET_ROOT layout
 # ---------------------------------------------------------------------------
 # @opentui/core resolves $OTUI_ASSET_ROOT/<packageName>/<fileName> where
 # packageName = "@opentui/core-linux-arm64" and fileName = "libopentui.so"
@@ -209,7 +232,7 @@ echo "Staged: $STAGE_DIR/libopentui.so"
 echo "Size:   $(du -h "$STAGE_DIR/libopentui.so" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# 8. Verify NEEDED entries (Android dlopen requires them)
+# 9. Verify NEEDED entries (Android dlopen requires them)
 # ---------------------------------------------------------------------------
 if readelf -d "$STAGE_DIR/libopentui.so" 2>/dev/null | grep -q "NEEDED.*libc.so"; then
     echo "OK: libopentui.so has NEEDED: libc.so (required for Android dlopen)"

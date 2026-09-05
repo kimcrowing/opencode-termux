@@ -1,8 +1,8 @@
 diff --git a/packages/native/build.zig b/packages/native/build.zig
-index b226da7..8482042 100644
+index b226da7..034795b 100644
 --- a/packages/native/build.zig
 +++ b/packages/native/build.zig
-@@ -186,13 +186,110 @@ fn addMiniaudioShim(
+@@ -186,13 +186,109 @@ fn addMiniaudioShim(
      };
  
      module.addIncludePath(b.path("src"));
@@ -92,29 +92,28 @@ index b226da7..8482042 100644
 +    });
 +}
 +
-+/// Give the shared library NEEDED entries for libc.so and libc++_shared.so.
++/// Give the shared library a NEEDED entry for libc++_shared.so.
 +///
-+/// The libc.so stub lives per-API-level (.../<api>/libc.so) while
-+/// libc++_shared.so sits directly in the arch directory. Linking them as object
-+/// files produces the NEEDED entries Android's linker needs without asking Zig
-+/// to provision a bionic libc.
++/// NEEDED libc.so comes from `-lc` itself (the libc file sent by
++/// ANDROID_ZIG_LIBC_FILE points Zig's -lc resolution at the NDK's per-API
++/// stub directory). libc++_shared.so, by contrast, Zig cannot discover at all:
++/// link_libcpp is skipped on Android (provisioning it would pull in a bionic
++/// libc), so we add the exact NDK sysroot .so as a plain object file, which
++/// produces the NEEDED entry.
 +fn linkAndroidStubs(b: *std.Build, lib: *std.Build.Step.Compile) void {
 +    const ndk_home = androidEnv(b, "ANDROID_NDK_HOME") orelse {
 +        std.debug.print("WARNING: ANDROID_NDK_HOME not set; cannot link bionic stubs\n", .{});
 +        return;
 +    };
 +    const arch_lib = androidArchLibDir(b, ndk_home);
-+    const api = androidEnv(b, "ANDROID_API") orelse "24";
-+    const libc_stub = b.pathJoin(&.{ arch_lib, api, "libc.so" });
 +    const libcpp = b.pathJoin(&.{ arch_lib, "libc++_shared.so" });
-+    lib.root_module.addObjectFile(.{ .cwd_relative = libc_stub });
 +    lib.root_module.addObjectFile(.{ .cwd_relative = libcpp });
 +}
 +
  fn appendCFlags(b: *std.Build, base: []const []const u8, extra: []const []const u8) []const []const u8 {
      const flags = b.allocator.alloc([]const u8, base.len + extra.len) catch @panic("OOM");
      @memcpy(flags[0..base.len], base);
-@@ -366,17 +463,42 @@ fn addNativeAudioDependencies(
+@@ -366,17 +462,42 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
          .linux => {
@@ -160,7 +159,7 @@ index b226da7..8482042 100644
      module.link_libcpp = true;
      module.addIncludePath(yoga_dep.path(""));
      module.addCSourceFiles(.{
-@@ -386,6 +508,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
+@@ -386,6 +507,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
      });
  }
  
@@ -186,18 +185,16 @@ index b226da7..8482042 100644
  fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
      switch (target.result.cpu.arch) {
          .x86_64, .aarch64 => {},
-@@ -405,12 +546,25 @@ fn addTranslatedCImports(
+@@ -405,12 +545,23 @@ fn addTranslatedCImports(
      optimize: std.builtin.OptimizeMode,
      target: std.Build.ResolvedTarget,
  ) void {
 +    // Zig 0.16 (and 0.15) ships no Android/bionic libc at all (lib/libc/include
-+    // has no aarch64-linux-android dir), so a translate-c module with its default
-+    // link_libc = true gets propagated into the final link by createModule() and
-+    // makes Zig answer `-lc` with "unable to provide libc for target ...android"
-+    // (compile graph walks every dependency's modules for link_libc, see
-+    // Build/Step/Compile.zig). The bionic headers are fed via NDK sysroot
-+    // -isystem paths and libc.so/libc++_shared.so are linked in buildTarget as
-+    // plain object files, so -lc must be suppressed here for Android.
++    // has no aarch64-linux-android dir). The root module's link_libc comes from
++    // the bionic libc file (--libc, see buildTarget); these translate-c modules
++    // must not add their own link_libc, or the compile graph's link_libc walk
++    // would double-count and the bionic headers would be the only source, which
++    // they are (fed via NDK sysroot -isystem paths already).
 +    const translate_link_libc = !isAndroidTarget(target);
      const miniaudio_translate = b.addTranslateC(.{
          .root_source_file = b.path("src/vendor/miniaudio/miniaudio.h"),
@@ -212,7 +209,7 @@ index b226da7..8482042 100644
      module.addImport("miniaudio", miniaudio_translate.createModule());
  
      const yoga_dep = b.dependency("yoga", .{});
-@@ -418,8 +572,12 @@ fn addTranslatedCImports(
+@@ -418,8 +569,12 @@ fn addTranslatedCImports(
          .root_source_file = yoga_dep.path("yoga/Yoga.h"),
          .target = target,
          .optimize = optimize,
@@ -225,19 +222,27 @@ index b226da7..8482042 100644
      module.addImport("yoga", yoga_translate.createModule());
  }
  
-@@ -748,7 +906,16 @@ fn buildTarget(
+@@ -748,7 +903,24 @@ fn buildTarget(
      if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
  
      addNativeAudioDependencies(b, module, target, macos_sdk_path);
 -    addYogaDependencies(b, module);
 +    addYogaDependenciesTarget(b, module, target);
 +
-+    // On Android the .so needs NEEDED libc.so so dlopen() can resolve symbols
-+    // like getauxval, and NEEDED libc++_shared.so for yoga (link_libcpp is
-+    // skipped above). Zig bundles neither for Android, so we add the NDK
-+    // sysroot stubs directly as link inputs - addObjectFile records the NEEDED
-+    // entry without triggering Zig's native libc provisioning.
++    // Android links against bionic libc, which Zig does not bundle. link_libc
++    // on the root module makes the std/c.zig `extern "c"` bindings (malloc etc.)
++    // legal; the libc file (--libc) that scripts/build-opentui.sh writes points
++    // Zig's -lc resolution at the NDK sysroot's bionic headers and per-API stub
++    // directory instead of failing with "unable to provide libc". libc++_shared.so
++    // still can't be discovered by Zig, so linkAndroidStubs adds it explicitly so
++    // the .so carries the NEEDED entries Android's dlopen() requires.
 +    if (isAndroidTarget(target)) {
++        if (androidEnv(b, "ANDROID_ZIG_LIBC_FILE")) |libc_path| {
++            b.libc_file = libc_path;
++            module.link_libc = true;
++        } else {
++            std.debug.print("WARNING: ANDROID_ZIG_LIBC_FILE not set; android link will lack bionic libc\n", .{});
++        }
 +        linkAndroidStubs(b, lib);
 +    }
  
