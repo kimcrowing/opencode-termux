@@ -297,8 +297,9 @@ jobs:
       - name: Build opencode2 for android
         env:
           # Bound Bun's heap so a spike fails loudly instead of the runner OOM
-          # killer taking the job down with no log.
-          BUN_JSC_heapSize: "3072"
+          # killer taking the job down with no log. JSC option, value in bytes
+          # (heapSize is not a valid name; bun 1.4.1 rejects it at startup).
+          BUN_JSC_gcMaxHeapSize: "3221225472"
         run: |
           set -euo pipefail
           export OPENCODE_PKG_DIR="$PWD/build/opencode-src/packages/cli"
