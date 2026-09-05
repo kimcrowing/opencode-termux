@@ -58,8 +58,8 @@ cat "$PLUGIN_DIR/server.ts"
 
 echo "== starting server (port $PORT) =="
 cd "$WORK/project"
-env LD_PRELOAD= \
-  -u OPENCODE_PASSWORD \
+env -u OPENCODE_PASSWORD \
+  LD_PRELOAD= \
   OPENCODE_SERVER_PASSWORD="$PASSWORD" \
   BUN_FEATURE_FLAG_DISABLE_EPOLL_PWAIT2=1 \
   "$BIN" serve --hostname 127.0.0.1 --port "$PORT" >"$WORK/server.log" 2>&1 &
