@@ -1,8 +1,8 @@
 diff --git a/packages/native/build.zig b/packages/native/build.zig
-index b226da7..5a2d09f 100644
+index b226da7..88eba00 100644
 --- a/packages/native/build.zig
 +++ b/packages/native/build.zig
-@@ -186,13 +186,91 @@ fn addMiniaudioShim(
+@@ -186,13 +186,87 @@ fn addMiniaudioShim(
      };
  
      module.addIncludePath(b.path("src"));
@@ -33,21 +33,17 @@ index b226da7..5a2d09f 100644
 +
 +/// Read an environment variable for Android build configuration.
 +///
-+/// Zig 0.16 removed std.process.getEnvVarOwned, so read directly from the
-+/// process environment instead. The returned slice points into the environment
-+/// block, which stays valid for the lifetime of the process, so nothing is
-+/// freed here.
-+fn androidEnv(key: []const u8) ?[]const u8 {
-+    const zkey = std.heap.page_allocator.dupeZ(u8, key) catch return null;
-+    defer std.heap.page_allocator.free(zkey);
-+    const value = std.posix.getenv(zkey) orelse return null;
-+    return std.mem.span(value);
++/// Zig 0.16 removed std.process.getEnvVarOwned and std.posix has no getenv, so
++/// read through the build graph's environment map instead - the API std.Build
++/// itself uses for things like DESTDIR and PATH.
++fn androidEnv(b: *std.Build, key: []const u8) ?[]const u8 {
++    return b.graph.environ_map.get(key);
 +}
 +
 +/// Expose the NDK sysroot bionic headers to @cImport. Zig cannot provision
 +/// bionic itself, but the NDK's headers are a plain filesystem away.
 +fn addAndroidBionicHeaders(b: *std.Build, module: *std.Build.Module) void {
-+    const ndk_home = androidEnv("ANDROID_NDK_HOME") orelse {
++    const ndk_home = androidEnv(b, "ANDROID_NDK_HOME") orelse {
 +        std.debug.print("WARNING: ANDROID_NDK_HOME not set; bionic libc headers unavailable\n", .{});
 +        return;
 +    };
@@ -80,22 +76,22 @@ index b226da7..5a2d09f 100644
 +/// files produces the NEEDED entries Android's linker needs without asking Zig
 +/// to provision a bionic libc.
 +fn linkAndroidStubs(b: *std.Build, lib: *std.Build.Step.Compile) void {
-+    const ndk_home = androidEnv("ANDROID_NDK_HOME") orelse {
++    const ndk_home = androidEnv(b, "ANDROID_NDK_HOME") orelse {
 +        std.debug.print("WARNING: ANDROID_NDK_HOME not set; cannot link bionic stubs\n", .{});
 +        return;
 +    };
 +    const arch_lib = androidArchLibDir(b, ndk_home);
-+    const api = androidEnv("ANDROID_API") orelse "24";
++    const api = androidEnv(b, "ANDROID_API") orelse "24";
 +    const libc_stub = b.pathJoin(&.{ arch_lib, api, "libc.so" });
 +    const libcpp = b.pathJoin(&.{ arch_lib, "libc++_shared.so" });
-+    lib.addObjectFile(.{ .cwd_relative = libc_stub });
-+    lib.addObjectFile(.{ .cwd_relative = libcpp });
++    lib.root_module.addObjectFile(.{ .cwd_relative = libc_stub });
++    lib.root_module.addObjectFile(.{ .cwd_relative = libcpp });
 +}
 +
  fn appendCFlags(b: *std.Build, base: []const []const u8, extra: []const []const u8) []const []const u8 {
      const flags = b.allocator.alloc([]const u8, base.len + extra.len) catch @panic("OOM");
      @memcpy(flags[0..base.len], base);
-@@ -366,17 +444,42 @@ fn addNativeAudioDependencies(
+@@ -366,17 +440,42 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
          .linux => {
@@ -141,7 +137,7 @@ index b226da7..5a2d09f 100644
      module.link_libcpp = true;
      module.addIncludePath(yoga_dep.path(""));
      module.addCSourceFiles(.{
-@@ -386,6 +489,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
+@@ -386,6 +485,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
      });
  }
  
@@ -153,7 +149,7 @@ index b226da7..5a2d09f 100644
 +/// resulting Foo.o files, one per Foo.cpp, live in OPENTUI_YOGA_OBJS_DIR.
 +fn addAndroidYogaObjects(b: *std.Build, module: *std.Build.Module) void {
 +    module.addIncludePath(b.dependency("yoga", .{}).path(""));
-+    const objs_dir = androidEnv("OPENTUI_YOGA_OBJS_DIR") orelse {
++    const objs_dir = androidEnv(b, "OPENTUI_YOGA_OBJS_DIR") orelse {
 +        std.debug.print("WARNING: OPENTUI_YOGA_OBJS_DIR not set; yoga C++ will not be linked!\n", .{});
 +        return;
 +    };
@@ -167,7 +163,7 @@ index b226da7..5a2d09f 100644
  fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
      switch (target.result.cpu.arch) {
          .x86_64, .aarch64 => {},
-@@ -748,7 +870,16 @@ fn buildTarget(
+@@ -748,7 +866,16 @@ fn buildTarget(
      if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
  
      addNativeAudioDependencies(b, module, target, macos_sdk_path);
