@@ -31,3 +31,6 @@ Thumbs.db
 
 # Temporary files
 tmp/
+
+# Runtime plugin state (uyanip keeps an HTTP session token next to server.ts)
+src/v2-plugin/*/session.json
