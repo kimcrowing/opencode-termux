@@ -121,12 +121,14 @@ jobs:
         # Sources are large and slow to clone. Keyed by version so bumping
         # OPENTUI_VERSION naturally invalidates them. zig-deps/ (the vendored
         # yoga/ghostty/uucode materialized by prepare-zig-deps.sh) lives inside
-        # build/opentui-src and is restored with it.
+        # build/opentui-src and is restored with it. The patch hash is included
+        # because a cached tree carries the old patch already applied, and the
+        # build script's forward/reverse apply check cannot recover from that.
         uses: actions/cache@v4
         with:
           path: |
             build/opentui-src
-          key: otui-src-${{ env.OPENTUI_VERSION }}-dep${{ hashFiles('scripts/build-opentui.sh') }}
+          key: otui-src-${{ env.OPENTUI_VERSION }}-p${{ hashFiles('patches/opentui/*.patch', 'scripts/build-opentui.sh') }}
 
       - name: Build libopentui.so
         if: steps.cache-so.outputs.cache-hit != 'true'

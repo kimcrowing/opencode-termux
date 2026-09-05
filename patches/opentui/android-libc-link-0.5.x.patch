@@ -1,8 +1,8 @@
 diff --git a/packages/native/build.zig b/packages/native/build.zig
-index b226da7..88eba00 100644
+index b226da7..7acb64b 100644
 --- a/packages/native/build.zig
 +++ b/packages/native/build.zig
-@@ -186,13 +186,87 @@ fn addMiniaudioShim(
+@@ -186,13 +186,100 @@ fn addMiniaudioShim(
      };
  
      module.addIncludePath(b.path("src"));
@@ -53,6 +53,19 @@ index b226da7..88eba00 100644
 +    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
 +}
 +
++/// Same as addAndroidBionicHeaders but for translate-c steps, whose headers
++/// (miniaudio's pthread.h, yoga's math.h) need the bionic system includes too.
++fn addAndroidBionicHeadersToTranslate(b: *std.Build, step: *std.Build.Step.TranslateC) void {
++    const ndk_home = androidEnv(b, "ANDROID_NDK_HOME") orelse {
++        std.debug.print("WARNING: ANDROID_NDK_HOME not set; bionic libc headers unavailable\n", .{});
++        return;
++    };
++    const sysroot = b.pathJoin(&.{ ndk_home, "toolchains", "llvm", "prebuilt", "linux-x86_64", "sysroot" });
++    const triple = "aarch64-linux-android";
++    step.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
++    step.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
++}
++
 +/// Path to the NDK's per-arch lib directory holding the libc.so API stubs and
 +/// libc++_shared.so.
 +fn androidArchLibDir(b: *std.Build, ndk_home: []const u8) []const u8 {
@@ -91,7 +104,7 @@ index b226da7..88eba00 100644
  fn appendCFlags(b: *std.Build, base: []const []const u8, extra: []const []const u8) []const []const u8 {
      const flags = b.allocator.alloc([]const u8, base.len + extra.len) catch @panic("OOM");
      @memcpy(flags[0..base.len], base);
-@@ -366,17 +440,42 @@ fn addNativeAudioDependencies(
+@@ -366,17 +453,42 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
          .linux => {
@@ -137,7 +150,7 @@ index b226da7..88eba00 100644
      module.link_libcpp = true;
      module.addIncludePath(yoga_dep.path(""));
      module.addCSourceFiles(.{
-@@ -386,6 +485,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
+@@ -386,6 +498,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
      });
  }
  
@@ -163,7 +176,27 @@ index b226da7..88eba00 100644
  fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
      switch (target.result.cpu.arch) {
          .x86_64, .aarch64 => {},
-@@ -748,7 +866,16 @@ fn buildTarget(
+@@ -411,6 +542,9 @@ fn addTranslatedCImports(
+         .optimize = optimize,
+     });
+     miniaudio_translate.addIncludePath(b.path("src"));
++    if (isAndroidTarget(target)) {
++        addAndroidBionicHeadersToTranslate(b, miniaudio_translate);
++    }
+     module.addImport("miniaudio", miniaudio_translate.createModule());
+ 
+     const yoga_dep = b.dependency("yoga", .{});
+@@ -420,6 +554,9 @@ fn addTranslatedCImports(
+         .optimize = optimize,
+     });
+     yoga_translate.addIncludePath(yoga_dep.path(""));
++    if (isAndroidTarget(target)) {
++        addAndroidBionicHeadersToTranslate(b, yoga_translate);
++    }
+     module.addImport("yoga", yoga_translate.createModule());
+ }
+ 
+@@ -748,7 +885,16 @@ fn buildTarget(
      if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
  
      addNativeAudioDependencies(b, module, target, macos_sdk_path);
