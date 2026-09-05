@@ -84,7 +84,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Precompile yoga C++ with the NDK clang++
+# 4. Materialize Zig vendor dependencies
+# ---------------------------------------------------------------------------
+# build.zig calls b.dependency("yoga"/"uucode"/"ghostty"), which build.zig.zon
+# declares as local paths under zig-deps/. That directory is gitignored and
+# produced by upstream's prepare-zig-deps.sh from src/vendor/zig-deps.tar.gz.
+# Skipping this makes every b.dependency() fail with
+#   unable to open '<native>/zig-deps/yoga': FileNotFound
+if [ ! -f "$OPENTUI_NATIVE_DIR/src/vendor/zig-deps.tar.gz" ]; then
+    echo "ERROR: zig-deps.tar.gz missing at $OPENTUI_NATIVE_DIR/src/vendor/" >&2
+    echo "       opentui ${OPENTUI_VERSION} changed its vendoring layout." >&2
+    exit 1
+fi
+echo ">>> Preparing vendored Zig dependencies (yoga/ghostty/uucode)..."
+(cd "$OPENTUI_NATIVE_DIR" && sh scripts/prepare-zig-deps.sh)
+
+# ---------------------------------------------------------------------------
+# 5. Precompile yoga C++ with the NDK clang++
 # ---------------------------------------------------------------------------
 # Zig cannot cross-compile C++ against a bionic libc it cannot provision, so we
 # compile yoga's C++ with the NDK's own clang++ (which sets up the correct
@@ -96,13 +112,14 @@ if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME:-/nonexistent}" 
 fi
 
 echo ">>> Precompiling yoga C++ with NDK clang++ ..."
-# Must match the yoga version in packages/native/build.zig.zon.
-YOGA_TAG="${YOGA_TAG:-v3.2.1}"
-if [ ! -d "$YOGA_SRC/.git" ]; then
-    git clone --depth 1 --branch "$YOGA_TAG" \
-        https://github.com/facebook/yoga.git "$YOGA_SRC"
-else
-    echo "    yoga source exists at $YOGA_SRC"
+# The yoga source comes from opentui's own vendored zig-deps, the SAME tree the
+# build.zig.zon points b.dependency("yoga") at. Compiling the .o files from a
+# separate facebook/yoga checkout risks a subtle version skew between the C++
+# objects and the headers/translate-c alias Zig resolves.
+YOGA_SRC="$OPENTUI_NATIVE_DIR/zig-deps/yoga"
+if [ ! -f "$YOGA_SRC/yoga/Yoga.h" ]; then
+    echo "ERROR: vendored yoga not found at $YOGA_SRC (prepare-zig-deps.sh incomplete?)" >&2
+    exit 1
 fi
 
 mkdir -p "$YOGA_OBJS"
@@ -139,7 +156,7 @@ fi
 echo "    yoga C++ objects -> $YOGA_OBJS (${#YOGA_SOURCES[@]} objects)"
 
 # ---------------------------------------------------------------------------
-# 5. Build with Zig
+# 6. Build with Zig
 # ---------------------------------------------------------------------------
 # -Dlibrary-target accepts an arbitrary triple; unrecognised targets are treated
 # as custom (build.zig falls through SUPPORTED_TARGETS to buildTarget directly),
@@ -175,7 +192,7 @@ if [ -z "$LIBOPENTUI" ] || [ ! -f "$LIBOPENTUI" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Stage into the OTUI_ASSET_ROOT layout
+# 7. Stage into the OTUI_ASSET_ROOT layout
 # ---------------------------------------------------------------------------
 # @opentui/core resolves $OTUI_ASSET_ROOT/<packageName>/<fileName> where
 # packageName = "@opentui/core-linux-arm64" and fileName = "libopentui.so"
@@ -192,7 +209,7 @@ echo "Staged: $STAGE_DIR/libopentui.so"
 echo "Size:   $(du -h "$STAGE_DIR/libopentui.so" | cut -f1)"
 
 # ---------------------------------------------------------------------------
-# 7. Verify NEEDED entries (Android dlopen requires them)
+# 8. Verify NEEDED entries (Android dlopen requires them)
 # ---------------------------------------------------------------------------
 if readelf -d "$STAGE_DIR/libopentui.so" 2>/dev/null | grep -q "NEEDED.*libc.so"; then
     echo "OK: libopentui.so has NEEDED: libc.so (required for Android dlopen)"

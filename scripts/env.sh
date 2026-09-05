@@ -68,8 +68,10 @@ export ANDROID_LD="${NDK_TOOLCHAIN}/bin/ld.lld"
 export OPENTUI_SRC="${WORK_DIR}/opentui-src"
 
 # Yoga is compiled with the NDK clang++ into .o files and linked by Zig, because
-# Zig cannot cross-compile C++ against a bionic libc it cannot provision.
-export YOGA_SRC="${WORK_DIR}/yoga-src"
+# Zig cannot cross-compile C++ against a bionic libc it cannot provision. The
+# source tree is opentui's own vendored copy (zig-deps/yoga), which is the same
+# tree build.zig.zon points b.dependency("yoga") at.
+export YOGA_SRC="${WORK_DIR}/opentui-src/packages/native/zig-deps/yoga"
 export YOGA_OBJS="${WORK_DIR}/yoga-objs"
 
 # --- Runtime asset layout ----------------------------------------------------

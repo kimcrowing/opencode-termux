@@ -119,13 +119,14 @@ jobs:
       - name: Cache opentui + yoga sources
         if: steps.cache-so.outputs.cache-hit != 'true'
         # Sources are large and slow to clone. Keyed by version so bumping
-        # OPENTUI_VERSION naturally invalidates them.
+        # OPENTUI_VERSION naturally invalidates them. zig-deps/ (the vendored
+        # yoga/ghostty/uucode materialized by prepare-zig-deps.sh) lives inside
+        # build/opentui-src and is restored with it.
         uses: actions/cache@v4
         with:
           path: |
             build/opentui-src
-            build/yoga-src
-          key: otui-src-${{ env.OPENTUI_VERSION }}
+          key: otui-src-${{ env.OPENTUI_VERSION }}-dep${{ hashFiles('scripts/build-opentui.sh') }}
 
       - name: Build libopentui.so
         if: steps.cache-so.outputs.cache-hit != 'true'
@@ -164,3 +165,248 @@ jobs:
           path: build/otui-assets
           if-no-files-found: error
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Android compat libraries
+  #
+  # Two tiny C files, seconds to build, independent of the OpenCode version.
+  # Split out so their cache key stays stable across upstream bumps.
+  # ---------------------------------------------------------------------------
+  build-compat-libs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache compat libs
+        id: cache-compat
+        uses: actions/cache@v4
+        with:
+          path: build/compat
+          key: compat-${{ env.ANDROID_NDK_VERSION }}-api${{ env.ANDROID_API }}-${{ hashFiles('src/*.c', 'scripts/build-compat-libs.sh') }}
+
+      - name: Cache Android NDK
+        if: steps.cache-compat.outputs.cache-hit != 'true'
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: /opt/android-ndk
+          key: ndk-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Install Android NDK
+        if: steps.cache-compat.outputs.cache-hit != 'true' && steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -fsSL --max-time 900 -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+          unzip -q ndk.zip
+          rm ndk.zip
+          sudo mkdir -p /opt/android-ndk
+          sudo cp -a android-ndk-${ANDROID_NDK_VERSION}/. /opt/android-ndk/
+          sudo chmod -R +rX /opt/android-ndk
+
+      - name: Build compat libraries
+        if: steps.cache-compat.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: /opt/android-ndk
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build-compat-libs.sh
+          ./scripts/build-compat-libs.sh
+
+      - name: Upload compat libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-libs-android
+          path: build/compat
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: opencode2 binary
+  #
+  # The Bun bundle. Memory is the constraint here (bytecode + minify + splitting
+  # over a large monorepo), so it gets its own runner and never shares one with
+  # the Zig/NDK native build.
+  # ---------------------------------------------------------------------------
+  build-opencode2:
+    needs: build-libopentui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Resolve upstream ref
+        id: ref
+        run: echo "ref=${{ inputs.upstream_ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache upstream source
+        id: cache-upstream
+        uses: actions/cache@v4
+        with:
+          path: build/opencode-src
+          # Bumped per run so a re-dispatch picks up new upstream commits, while
+          # restore-keys lets a same-ref rerun reuse the previous checkout.
+          key: opencode-src-${{ steps.ref.outputs.ref }}-${{ github.run_id }}
+          restore-keys: |
+            opencode-src-${{ steps.ref.outputs.ref }}-
+
+      - name: Clone upstream opencode (v2 / beta)
+        run: |
+          set -euo pipefail
+          REF="${{ steps.ref.outputs.ref }}"
+          if [ -d build/opencode-src/.git ]; then
+            echo "upstream checkout exists, refreshing"
+            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
+            git -C build/opencode-src checkout --force FETCH_HEAD || true
+          else
+            mkdir -p build
+            git clone --depth 1 --branch "$REF" \
+              https://github.com/anomalyco/opencode.git build/opencode-src
+          fi
+          SHA="$(git -C build/opencode-src rev-parse HEAD)"
+          echo "$SHA" > build/opencode-src/.built-sha
+          echo "::notice::upstream HEAD: $SHA"
+
+      - name: Cache bun install
+        id: cache-install
+        uses: actions/cache@v4
+        with:
+          path: build/opencode-src/node_modules
+          key: v2-bun-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+
+      - name: Download libopentui.so
+        uses: actions/download-artifact@v4
+        with:
+          name: libopentui-android
+          path: build/otui-assets
+
+      - name: Install dependencies
+        if: steps.cache-install.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd build/opencode-src
+          bun install --os="*" --cpu="*"
+
+      - name: Build opencode2 for android
+        env:
+          # Bound Bun's heap so a spike fails loudly instead of the runner OOM
+          # killer taking the job down with no log.
+          BUN_JSC_heapSize: "3072"
+        run: |
+          set -euo pipefail
+          export OPENCODE_PKG_DIR="$PWD/build/opencode-src/packages/cli"
+          bun run scripts/build-opencode2.ts \
+            ${{ inputs.skip_web_ui && '--skip-web-ui' || '' }}
+
+      - name: Stash upstream SHA in the bundle
+        # Stage 4 has no access to the checkout and uses this to name the archive.
+        run: |
+          set -euo pipefail
+          cp build/opencode-src/.built-sha \
+            build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android/bin/.built-sha
+
+      - name: Verify binary
+        run: |
+          set -euo pipefail
+          BIN="build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android/bin/opencode2"
+          test -f "$BIN" || {
+            echo "::error::binary missing at $BIN"
+            ls -R build/opencode-src/packages/cli/dist || true
+            exit 1
+          }
+          file "$BIN"
+          # aarch64 cannot execute here, so assert the ELF target instead.
+          readelf -h "$BIN" | grep -q "AArch64" \
+            || { echo "::error::binary is not AArch64"; exit 1; }
+          echo "::notice::opencode2 OK ($(du -h "$BIN" | cut -f1))"
+
+      - name: Upload opencode2
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode2-android
+          path: build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: bundle
+  #
+  # Assembles the shippable set: binary + native runtime assets + compat libs.
+  # Cheap - it only archives what the other jobs produced.
+  # ---------------------------------------------------------------------------
+  package:
+    needs: [build-libopentui, build-compat-libs, build-opencode2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download opencode2
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode2-android
+          path: package/bin
+
+      - name: Download libopentui.so
+        uses: actions/download-artifact@v4
+        with:
+          name: libopentui-android
+          path: package/otui-assets
+
+      - name: Download compat libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: compat-libs-android
+          path: package/lib
+
+      - name: Copy libc++_shared.so from the NDK
+        # Bun's JIT modules need libc++_shared.so and Android's /system does not
+        # provide it, so ship the NDK copy.
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -fsSL --max-time 900 -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+          unzip -q -o ndk.zip "android-ndk-${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          cp "android-ndk-${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            "$GITHUB_WORKSPACE/package/lib/"
+          rm -rf ndk.zip "android-ndk-${ANDROID_NDK_VERSION}"
+
+      - name: Copy launcher
+        run: |
+          set -euo pipefail
+          cp termux/start-opencode2.sh package/
+          chmod +x package/start-opencode2.sh package/bin/opencode2
+          find package -type f | sort
+
+      - name: Record upstream SHA
+        id: sha
+        run: |
+          set -euo pipefail
+          # build/opencode-src is not present in this job (stage 3 owned it), so
+          # read the SHA that stage 3 stashed into the bundle.
+          SHA="$(cat package/bin/.built-sha 2>/dev/null || echo unknown)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice::upstream SHA: $SHA"
+
+      - name: Create archive
+        run: |
+          set -euo pipefail
+          SHORT="$(printf '%s' '${{ steps.sha.outputs.sha }}' | cut -c1-8)"
+          NAME="opencode2-android-aarch64-${SHORT}"
+          mkdir -p /tmp/pkg
+          cp -a package "/tmp/pkg/$NAME"
+          tar -czf "/tmp/$NAME.tar.gz" -C /tmp/pkg "$NAME"
+          ls -la "/tmp/$NAME.tar.gz"
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode2-android-bundle
+          path: /tmp/opencode2-android-aarch64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
