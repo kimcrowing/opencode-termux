@@ -59,13 +59,13 @@ jobs:
   build-libopentui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache libopentui.so
         # The expensive output. Keyed on everything that affects it: the tag,
         # the patch contents, the toolchain versions and the API level.
         id: cache-so
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/otui-assets
           key: libopentui-${{ env.OPENTUI_VERSION }}-zig${{ env.ZIG_VERSION }}-${{ env.ANDROID_NDK_VERSION }}-api${{ env.ANDROID_API }}-${{ hashFiles('patches/opentui/*.patch', 'scripts/build-opentui.sh') }}
@@ -73,7 +73,7 @@ jobs:
       - name: Cache Zig toolchain
         if: steps.cache-so.outputs.cache-hit != 'true'
         id: cache-zig
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/zig
           key: zig-${{ runner.os }}-${{ env.ZIG_VERSION }}
@@ -97,7 +97,7 @@ jobs:
       - name: Cache Android NDK
         if: steps.cache-so.outputs.cache-hit != 'true'
         id: cache-ndk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/android-ndk
           key: ndk-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}
@@ -124,7 +124,7 @@ jobs:
         # build/opentui-src and is restored with it. The patch hash is included
         # because a cached tree carries the old patch already applied, and the
         # build script's forward/reverse apply check cannot recover from that.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             build/opentui-src
@@ -161,7 +161,7 @@ jobs:
           echo "::notice::libopentui.so OK ($(du -h "$SO" | cut -f1))"
 
       - name: Upload libopentui.so
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: libopentui-android
           path: build/otui-assets
@@ -177,11 +177,11 @@ jobs:
   build-compat-libs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache compat libs
         id: cache-compat
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/compat
           key: compat-${{ env.ANDROID_NDK_VERSION }}-api${{ env.ANDROID_API }}-${{ hashFiles('src/*.c', 'scripts/build-compat-libs.sh') }}
@@ -189,7 +189,7 @@ jobs:
       - name: Cache Android NDK
         if: steps.cache-compat.outputs.cache-hit != 'true'
         id: cache-ndk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/android-ndk
           key: ndk-${{ runner.os }}-${{ env.ANDROID_NDK_VERSION }}
@@ -217,7 +217,7 @@ jobs:
           ./scripts/build-compat-libs.sh
 
       - name: Upload compat libraries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: compat-libs-android
           path: build/compat
@@ -235,7 +235,7 @@ jobs:
     needs: build-libopentui
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -248,7 +248,7 @@ jobs:
 
       - name: Cache upstream source
         id: cache-upstream
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/opencode-src
           # Bumped per run so a re-dispatch picks up new upstream commits, while
@@ -276,13 +276,13 @@ jobs:
 
       - name: Cache bun install
         id: cache-install
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/opencode-src/node_modules
           key: v2-bun-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
 
       - name: Download libopentui.so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: libopentui-android
           path: build/otui-assets
@@ -328,7 +328,7 @@ jobs:
           echo "::notice::opencode2 OK ($(du -h "$BIN" | cut -f1))"
 
       - name: Upload opencode2
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: opencode2-android
           path: build/opencode-src/packages/cli/dist/opencode2-linux-aarch64-android
@@ -345,22 +345,22 @@ jobs:
     needs: [build-libopentui, build-compat-libs, build-opencode2]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download opencode2
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: opencode2-android
           path: package/bin
 
       - name: Download libopentui.so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: libopentui-android
           path: package/otui-assets
 
       - name: Download compat libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: compat-libs-android
           path: package/lib
@@ -406,7 +406,7 @@ jobs:
           ls -la "/tmp/$NAME.tar.gz"
 
       - name: Upload release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: opencode2-android-bundle
           path: /tmp/opencode2-android-aarch64-*.tar.gz

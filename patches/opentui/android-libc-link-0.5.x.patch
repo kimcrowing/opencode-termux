@@ -1,8 +1,8 @@
 diff --git a/packages/native/build.zig b/packages/native/build.zig
-index b226da7..7acb64b 100644
+index b226da7..117c021 100644
 --- a/packages/native/build.zig
 +++ b/packages/native/build.zig
-@@ -186,13 +186,100 @@ fn addMiniaudioShim(
+@@ -186,13 +186,110 @@ fn addMiniaudioShim(
      };
  
      module.addIncludePath(b.path("src"));
@@ -64,6 +64,16 @@ index b226da7..7acb64b 100644
 +    const triple = "aarch64-linux-android";
 +    step.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
 +    step.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
++    // bionic headers annotate parameters with _Nonnull/_Nullable/_Null_unspecified.
++    // In array-declarator position (e.g. 'const struct timeval __times[_Nullable 2]')
++    // the clang shipped inside Zig rejects the specifier on an array type:
++    //   error: nullability specifier cannot be applied to non-pointer type 'const struct timeval [2]'
++    // Strip them at the preprocessor so translate-c sees declarations without
++    // the annotations. clang has no effect from the macro value itself, and the
++    // lost annotations are irrelevant to @cImport() (Zig discards them anyway).
++    step.defineCMacro("_Nonnull", "");
++    step.defineCMacro("_Nullable", "");
++    step.defineCMacro("_Null_unspecified", "");
 +}
 +
 +/// Path to the NDK's per-arch lib directory holding the libc.so API stubs and
@@ -104,7 +114,7 @@ index b226da7..7acb64b 100644
  fn appendCFlags(b: *std.Build, base: []const []const u8, extra: []const []const u8) []const []const u8 {
      const flags = b.allocator.alloc([]const u8, base.len + extra.len) catch @panic("OOM");
      @memcpy(flags[0..base.len], base);
-@@ -366,17 +453,42 @@ fn addNativeAudioDependencies(
+@@ -366,17 +463,42 @@ fn addNativeAudioDependencies(
      switch (target.result.os.tag) {
          .macos => addMacOSSystemLibraries(b, module, macos_sdk_path.?),
          .linux => {
@@ -150,7 +160,7 @@ index b226da7..7acb64b 100644
      module.link_libcpp = true;
      module.addIncludePath(yoga_dep.path(""));
      module.addCSourceFiles(.{
-@@ -386,6 +498,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
+@@ -386,6 +508,25 @@ fn addYogaDependencies(b: *std.Build, module: *std.Build.Module) void {
      });
  }
  
@@ -176,7 +186,7 @@ index b226da7..7acb64b 100644
  fn ghosttyVtAvailable(target: std.Build.ResolvedTarget) bool {
      switch (target.result.cpu.arch) {
          .x86_64, .aarch64 => {},
-@@ -411,6 +542,9 @@ fn addTranslatedCImports(
+@@ -411,6 +552,9 @@ fn addTranslatedCImports(
          .optimize = optimize,
      });
      miniaudio_translate.addIncludePath(b.path("src"));
@@ -186,7 +196,7 @@ index b226da7..7acb64b 100644
      module.addImport("miniaudio", miniaudio_translate.createModule());
  
      const yoga_dep = b.dependency("yoga", .{});
-@@ -420,6 +554,9 @@ fn addTranslatedCImports(
+@@ -420,6 +564,9 @@ fn addTranslatedCImports(
          .optimize = optimize,
      });
      yoga_translate.addIncludePath(yoga_dep.path(""));
@@ -196,7 +206,7 @@ index b226da7..7acb64b 100644
      module.addImport("yoga", yoga_translate.createModule());
  }
  
-@@ -748,7 +885,16 @@ fn buildTarget(
+@@ -748,7 +895,16 @@ fn buildTarget(
      if (target.result.os.tag == .linux and optimize != .Debug) lib.build_id = .sha1;
  
      addNativeAudioDependencies(b, module, target, macos_sdk_path);
