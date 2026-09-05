@@ -13,8 +13,9 @@ name: v2 from-source
 #
 # Stages:
 #   1. build-libopentui  -> libopentui.so (Zig + NDK, the memory-heavy step)
-#   2. build-opencode2   -> opencode2 binary (Bun bundle for android)
-#   3. package           -> shippable archive
+#   2. build-web-assets  -> embedded web UI archive (Vite; cached by upstream SHA)
+#   3. build-opencode2   -> opencode2 binary (Bun bundle for android)
+#   4. package           -> shippable archive
 
 on:
   workflow_dispatch:
@@ -225,6 +226,94 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Stage 2: web UI assets (Vite build of packages/app)
+  #
+  # The embedded web archive is produced by a Vite build - the second biggest
+  # memory consumer after the Zig/NDK build. It is cached by upstream SHA so a
+  # same-commit re-dispatch skips Vite entirely, and the opencode2 bundle job
+  # reuses this artifact instead of re-running Vite itself.
+  # ---------------------------------------------------------------------------
+  build-web-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Resolve upstream ref
+        id: ref
+        run: echo "ref=${{ inputs.upstream_ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache upstream source
+        id: cache-upstream
+        uses: actions/cache@v5
+        with:
+          path: build/opencode-src
+          key: opencode-src-web-${{ steps.ref.outputs.ref }}-${{ github.run_id }}
+          restore-keys: |
+            opencode-src-web-${{ steps.ref.outputs.ref }}-
+
+      - name: Clone upstream opencode (v2 / beta)
+        id: clone
+        run: |
+          set -euo pipefail
+          REF="${{ steps.ref.outputs.ref }}"
+          if [ -d build/opencode-src/.git ]; then
+            echo "upstream checkout exists, refreshing"
+            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
+            git -C build/opencode-src checkout --force FETCH_HEAD || true
+          else
+            mkdir -p build
+            git clone --depth 1 --branch "$REF" \
+              https://github.com/anomalyco/opencode.git build/opencode-src
+          fi
+          SHA="$(git -C build/opencode-src rev-parse HEAD 2>/dev/null || true)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          test -n "$SHA" || { echo "::error::empty upstream SHA"; exit 1; }
+
+      - name: Cache bun install
+        id: cache-install
+        uses: actions/cache@v5
+        with:
+          path: build/opencode-src/node_modules
+          key: v2-web-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache-install.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd build/opencode-src
+          bun install --os="*" --cpu="*"
+
+      - name: Cache web assets
+        id: cache-web
+        uses: actions/cache@v5
+        with:
+          path: build/web-assets
+          key: v2-web-assets-${{ runner.os }}-${{ inputs.skip_web_ui }}-${{ steps.clone.outputs.sha }}
+
+      - name: Build web assets
+        if: steps.cache-web.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cp scripts/build-web-assets.ts build/opencode-src/packages/cli/script/build-web-assets.ts
+          export OPENCODE_PKG_DIR="$GITHUB_WORKSPACE/build/opencode-src/packages/cli"
+          export OPENCODE_WEB_ASSETS_OUT="$GITHUB_WORKSPACE/build/web-assets/web-assets.b64"
+          cd build/opencode-src/packages/cli
+          bun run script/build-web-assets.ts ${{ inputs.skip_web_ui && '--skip-web-ui' || '' }}
+
+      - name: Upload web assets
+        uses: actions/upload-artifact@v5
+        with:
+          name: opencode-web-assets
+          path: build/web-assets/web-assets.b64
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Stage 3: opencode2 binary
   #
   # The Bun bundle. Memory is the constraint here (bytecode + minify + splitting
@@ -232,7 +321,7 @@ jobs:
   # the Zig/NDK native build.
   # ---------------------------------------------------------------------------
   build-opencode2:
-    needs: build-libopentui
+    needs: [build-libopentui, build-web-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -287,6 +376,12 @@ jobs:
           name: libopentui-android
           path: build/otui-assets
 
+      - name: Download web app assets
+        uses: actions/download-artifact@v5
+        with:
+          name: opencode-web-assets
+          path: build/web-assets
+
       - name: Install dependencies
         if: steps.cache-install.outputs.cache-hit != 'true'
         run: |
@@ -302,9 +397,16 @@ jobs:
           BUN_JSC_gcMaxHeapSize: "3221225472"
         run: |
           set -euo pipefail
-          export OPENCODE_PKG_DIR="$PWD/build/opencode-src/packages/cli"
-          bun run scripts/build-opencode2.ts \
-            ${{ inputs.skip_web_ui && '--skip-web-ui' || '' }}
+          # Make @opencode-ai/script and ./app-assets resolvable: both resolve
+          # relative to the script's own location, so the script must live
+          # inside the upstream checkout (packages/cli/script/).
+          cp scripts/build-opencode2.ts build/opencode-src/packages/cli/script/build-opencode2.ts
+          export OPENCODE_PKG_DIR="$GITHUB_WORKSPACE/build/opencode-src/packages/cli"
+          # Reuse the archive from the build-web-assets job (empty when
+          # skip_web_ui=true); never re-run Vite here.
+          export OPENCODE_APP_ASSETS="$GITHUB_WORKSPACE/build/web-assets/web-assets.b64"
+          cd build/opencode-src/packages/cli
+          bun run script/build-opencode2.ts
 
       - name: Stash upstream SHA in the bundle
         # Stage 4 has no access to the checkout and uses this to name the archive.

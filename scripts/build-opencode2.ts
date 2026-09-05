@@ -10,8 +10,9 @@
 // here pinned to a single android target. This is the same approach v1's
 // build-opencode-android.ts takes.
 //
-// Run with the upstream checkout as the working tree root:
-//   OPENCODE_PKG_DIR=<checkout>/packages/cli bun run scripts/build-opencode2.ts
+// Run inside the upstream checkout (copy into packages/cli/script/):
+//   OPENCODE_PKG_DIR=<checkout>/packages/cli \
+//     bun run script/build-opencode2.ts [--skip-web-ui]
 //
 // The three things Android needs that upstream doesn't do
 // -------------------------------------------------------
@@ -40,11 +41,10 @@ const skipWebUi = process.argv.includes("--skip-web-ui")
 const sourcemaps = process.argv.includes("--sourcemaps")
 
 // packages/cli is the v2 entry package (v1 used packages/opencode).
-const dir = process.env.OPENCODE_PKG_DIR ?? path.resolve(import.meta.dirname, "../../packages/cli")
+const dir = process.env.OPENCODE_PKG_DIR ?? path.resolve(import.meta.dirname, "..")
 process.chdir(dir)
 
 const { Script } = await import("@opencode-ai/script")
-const pkg = (await import("../package.json")).default
 
 const name = "opencode2-linux-aarch64-android"
 const binary = "opencode2"
@@ -56,9 +56,15 @@ const solidPlugin = createSolidTransformPlugin()
 // Skipping this is the single biggest lever on peak memory; the TUI works
 // without it, so keep it optional for quick iterations.
 //
-// buildAppArchive(channel, { skipBuild: true }) returns an archive containing no
-// assets, which is what we want when --skip-web-ui is passed.
+// OPENCODE_APP_ASSETS, when set, points at a prebuilt archive written by
+// scripts/build-web-assets.ts (from the separate build-web-assets job). The
+// build steps above and this job end in the SAME base64 brotli string, so
+// reusing it here skips the Vite build without changing the output.
 const buildAppArchive = async () => {
+  if (process.env.OPENCODE_APP_ASSETS) {
+    const archive = (await Bun.file(process.env.OPENCODE_APP_ASSETS).text()).trim()
+    if (archive) return archive
+  }
   const { buildAppArchive: build } = await import("./app-assets")
   return build(Script.channel, { skipBuild: skipWebUi })
 }
@@ -111,29 +117,22 @@ export default () => binding ?? { subscribe() { throw new Error("file watching i
 }
 
 // ---------------------------------------------------------------------------
-// Install native deps for all platforms
+// Native deps
 // ---------------------------------------------------------------------------
-// --os/--cpu="*" forces Bun to fetch every optional platform package so the
-// android bundle can still resolve @opentui/core's JS entry (its native .so is
-// supplied at runtime via OTUI_ASSET_ROOT).
-const install = async (spec: string) => {
-  console.log(`installing ${spec}`)
-  await $`bun install --os="*" --cpu="*" ${spec}`
-}
-
-await install(`@opentui/core@${pkg.dependencies["@opentui/core"]}`)
-await install(`@opentui/solid@${pkg.dependencies["@opentui/solid"]}`)
-if (pkg.dependencies["@parcel/watcher"]) {
-  await install(`@parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`)
-}
+// The workflow already runs `bun install --os="*" --cpu="*"` at the checkout
+// root, which installs every workspace dependency including the platform
+// optional packages (@opentui/core-*, @parcel/watcher-*). Nothing extra to
+// install here; the android bundle just needs the JS entries to resolve, and
+// the native .so is supplied at runtime via OTUI_ASSET_ROOT.
 
 await $`rm -rf dist/${name}`
 await $`mkdir -p dist/${name}/bin`
 
 console.log(`building ${name}`)
 
-// Keep Bun's bundler memory in check on small runners.
-if (!process.env.BUN_JSC_heapSize) process.env.BUN_JSC_heapSize = "3072"
+// Bun respects BUN_JSC_gcMaxHeapSize (bytes) to bound its heap; the workflow
+// sets it via env. Do not assign BUN_JSC_heapSize here - it is not a valid
+// option name and bun 1.4.1 rejects it at startup.
 
 const result = await Bun.build({
   entrypoints: ["./src/index.ts"],
