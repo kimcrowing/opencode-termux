@@ -1,0 +1,54 @@
+diff --git a/packages/ai/src/protocols/openai-chat.ts b/packages/ai/src/protocols/openai-chat.ts
+index 9e749a9..d666051 100644
+--- a/packages/ai/src/protocols/openai-chat.ts
++++ b/packages/ai/src/protocols/openai-chat.ts
+@@ -693,6 +693,19 @@ const detectSupportsStrictMode = (provider: string, baseURL: string | undefined)
+   return !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia
+ }
+ 
++// NVIDIA's OpenAI-compatible gateway (integrate.api.nvidia.com) strictly
++// validates request parameters and rejects `prompt_cache_key` with HTTP 400
++// ("Validation: Unsupported parameter(s): `prompt_cache_key`"). Providers that
++// accept the cache key (OpenAI, Azure, DeepSeek, Zai, ...) keep the current
++// behavior; gateways known to error out are excluded. Override per model with
++// `compatibility.supportsPromptCacheKey`.
++const detectSupportsPromptCacheKey = (provider: string, baseURL: string | undefined): boolean => {
++  const p = provider.toLowerCase()
++  const url = (baseURL ?? "").toLowerCase()
++  const isNvidia = p === "nvidia" || url.includes("integrate.api.nvidia.com")
++  return !isNvidia
++}
++
+ const detectZaiToolStream = (provider: string, baseURL: string | undefined, modelID: string): boolean => {
+   const p = provider.toLowerCase()
+   const url = (baseURL ?? "").toLowerCase()
+@@ -709,9 +722,9 @@ const detectZaiToolStream = (provider: string, baseURL: string | undefined, mode
+   return true
+ }
+ 
+-const lowerOptions = (request: LLMRequest, supportsStore: boolean) => {
++const lowerOptions = (request: LLMRequest, supportsStore: boolean, supportsPromptCacheKey: boolean) => {
+   const options = OpenAIOptions.resolve(request)
+-  const cacheKey = ProviderShared.promptCacheKey(request)
++  const cacheKey = supportsPromptCacheKey ? ProviderShared.promptCacheKey(request) : undefined
+   return {
+     ...(supportsStore && options.store !== undefined ? { store: options.store } : {}),
+     // For providers that support `store`, ensure stateless `store:false` is sent
+@@ -742,6 +755,8 @@ export const fromRequest = Effect.fn("OpenAIChat.fromRequest")(function* (
+   const detectedMaxTokensField = detectMaxTokensField(provider, baseURL)
+   const maxTokensField = request.model.compatibility?.maxTokensField ?? detectedMaxTokensField
+   const supportsStore = request.model.compatibility?.supportsStore ?? detectSupportsStore(provider, baseURL)
++  const supportsPromptCacheKey =
++    request.model.compatibility?.supportsPromptCacheKey ?? detectSupportsPromptCacheKey(provider, baseURL)
+   const supportsUsageInStreaming =
+     request.model.compatibility?.supportsUsageInStreaming ?? detectSupportsUsageInStreaming()
+   const supportsStrictMode =
+@@ -779,7 +794,7 @@ export const fromRequest = Effect.fn("OpenAIChat.fromRequest")(function* (
+     presence_penalty: generation?.presencePenalty,
+     seed: generation?.seed,
+     stop: generation?.stop,
+-    ...lowerOptions(request, supportsStore),
++    ...lowerOptions(request, supportsStore, supportsPromptCacheKey),
+   }
+ })
+ 
