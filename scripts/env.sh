@@ -30,9 +30,9 @@ export OPENCODE_SRC="${WORK_DIR}/opencode-src"
 
 # --- Versions ----------------------------------------------------------------
 # OpenCode v2 requires a newer Bun than v1 (1.4.0) because packages/cli uses
-# Bun APIs added in 1.4.x. 1.4.1 ships bun-linux-aarch64-android.zip, which is
-# the compile target we need.
-export BUN_VERSION="${BUN_VERSION:-1.4.1}"
+# Bun APIs added in 1.4.x. The upstream @opencode-ai/script currently requires
+# bun@^1.4.2; 1.4.x ships bun-linux-aarch64-android.zip, the compile target.
+export BUN_VERSION="${BUN_VERSION:-1.4.2}"
 
 # @opentui/core version required by the pinned v2 source (read from the upstream
 # catalog in package.json, so this is only a fallback / documentation value).

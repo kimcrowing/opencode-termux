@@ -40,7 +40,7 @@ concurrency:
 
 env:
   # Single source of truth for tool versions. Keep in sync with scripts/env.sh.
-  BUN_VERSION: "1.4.1"
+  BUN_VERSION: "1.4.2"
   ZIG_VERSION: "0.16.0"
   OPENTUI_VERSION: "v0.5.10"
   ANDROID_API: "24"
