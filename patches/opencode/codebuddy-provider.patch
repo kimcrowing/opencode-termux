@@ -1,3 +1,23 @@
+﻿diff --git a/packages/core/src/plugin/provider.ts b/packages/core/src/plugin/provider.ts
+index 18ef4e9..6ca4705 100644
+--- a/packages/core/src/plugin/provider.ts
++++ b/packages/core/src/plugin/provider.ts
+@@ -5,6 +5,7 @@ import { AzurePlugin } from "./provider/azure.js"
+ import { CerebrasPlugin } from "./provider/cerebras.js"
+ import { CloudflareAIGatewayPlugin } from "./provider/cloudflare-ai-gateway.js"
+ import { CloudflareWorkersAIPlugin } from "./provider/cloudflare-workers-ai.js"
++import { CodeBuddyPlugin } from "./provider/codebuddy.js"
+ import { CoherePlugin } from "./provider/cohere.js"
+ import { DynamicProviderPlugin } from "./provider/dynamic.js"
+ import { GatewayPlugin } from "./provider/gateway.js"
+@@ -40,6 +41,7 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
+   CerebrasPlugin,
+   CloudflareAIGatewayPlugin,
+   CloudflareWorkersAIPlugin,
++  CodeBuddyPlugin,
+   CoherePlugin,
+   GatewayPlugin,
+   GithubCopilotPlugin,
 diff --git a/packages/core/src/plugin/provider/codebuddy.ts b/packages/core/src/plugin/provider/codebuddy.ts
 new file mode 100644
 index 0000000..d09bb39

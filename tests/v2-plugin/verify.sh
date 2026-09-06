@@ -134,8 +134,24 @@ elif echo "$PLUGIN_JSON" | grep -q '"status":"failed"'; then
   FAILURES=1
 fi
 
+# Provider-plugin gate: the codebuddy provider must be registered and active.
+# Catches patched-source regressions (e.g. a patch that ships provider/codebuddy.ts
+# but forgets the ProviderPlugins registration in provider.ts).
+if [[ -z "$PLUGIN_JSON" ]]; then
+  echo "::error::/api/plugin returned nothing; cannot verify codebuddy registration"
+  FAILURES=1
+elif ! echo "$PLUGIN_JSON" | grep -q '"id":"opencode.provider.codebuddy","source":{"type":"builtin"}'; then
+  echo "::error::opencode.provider.codebuddy is not registered as a builtin provider"
+  echo "::error::$PLUGIN_JSON"
+  FAILURES=1
+elif ! echo "$PLUGIN_JSON" | grep -o '"id":"opencode.provider.codebuddy".\{0,200\}' | grep -q '"status":"active"'; then
+  echo "::error::opencode.provider.codebuddy is registered but not active"
+  echo "::error::$(echo "$PLUGIN_JSON" | grep -o '"id":"opencode.provider.codebuddy".\{0,200\}')"
+  FAILURES=1
+fi
+
 if [[ "$FAILURES" -ne 0 ]]; then
   echo "::error::v2 plugin verification FAILED"
   exit 1
 fi
-echo "::notice::v2 plugin verification PASSED (hello-v2 active, tool registered)"
+echo "::notice::v2 plugin verification PASSED (hello-v2 active, tool registered, codebuddy provider active)"

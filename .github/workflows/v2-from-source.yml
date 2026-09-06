@@ -347,18 +347,21 @@ jobs:
             opencode-src-${{ steps.ref.outputs.ref }}-
 
       - name: Clone upstream opencode (v2 / beta)
+        # accepts a branch or a full SHA (= input.upstream_ref); pinned SHAs give
+        # deterministic builds against the snapshot the codebuddy patch targets.
         run: |
           set -euo pipefail
           REF="${{ steps.ref.outputs.ref }}"
-          if [ -d build/opencode-src/.git ]; then
-            echo "upstream checkout exists, refreshing"
-            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
-            git -C build/opencode-src checkout --force FETCH_HEAD || true
-          else
-            mkdir -p build
-            git clone --depth 1 --branch "$REF" \
-              https://github.com/anomalyco/opencode.git build/opencode-src
+          mkdir -p build
+          if [ ! -d build/opencode-src/.git ]; then
+            git init -q build/opencode-src
+            git -C build/opencode-src remote add origin \
+              https://github.com/anomalyco/opencode.git
           fi
+          git -C build/opencode-src remote set-url origin \
+            https://github.com/anomalyco/opencode.git
+          git -C build/opencode-src fetch --depth 1 origin "$REF"
+          git -C build/opencode-src checkout --force FETCH_HEAD
           SHA="$(git -C build/opencode-src rev-parse HEAD)"
           echo "$SHA" > build/opencode-src/.built-sha
           echo "::notice::upstream HEAD: $SHA"
@@ -499,15 +502,16 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ steps.ref.outputs.ref }}"
-          if [ -d build/opencode-src/.git ]; then
-            echo "upstream checkout exists, refreshing"
-            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
-            git -C build/opencode-src checkout --force FETCH_HEAD || true
-          else
-            mkdir -p build
-            git clone --depth 1 --branch "$REF" \
-              https://github.com/anomalyco/opencode.git build/opencode-src
+          mkdir -p build
+          if [ ! -d build/opencode-src/.git ]; then
+            git init -q build/opencode-src
+            git -C build/opencode-src remote add origin \
+              https://github.com/anomalyco/opencode.git
           fi
+          git -C build/opencode-src remote set-url origin \
+            https://github.com/anomalyco/opencode.git
+          git -C build/opencode-src fetch --depth 1 origin "$REF"
+          git -C build/opencode-src checkout --force FETCH_HEAD
           SHA="$(git -C build/opencode-src rev-parse HEAD)"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "::notice::upstream HEAD: $SHA"
