@@ -115,15 +115,26 @@ const TOOLS: ToolDef[] = [
   {
     name: "list_documents",
     description:
-      "递归列出所有可用文档，返回 documents 数组。国内项含 rid/ds/wenjiandm（传给 download_document）；国外项含可直接下载的 uri。",
+      "递归列出所有可用文档，返回 documents 数组（含 name/rid/ds/wenjiandm/is_scjd/anjianbh/path，国内可据此 download_document）。\n" +
+      "用法示例：\n" +
+      "  1) 先 get_case_summary(patent_no) 确认案件存在；再 get_examination_tree(patent_no) 看目录结构。\n" +
+      "  2) list_documents(patent_no, scope='domestic') 一次性列出全部可下载文档：\n" +
+      "      申请文件(SQWJ)、中间文件(ZJWJ，含意见陈述书)、通知书(TZS)、复审文件(FSWJ)等。\n" +
+      "  3) 取目标文档的 rid/ds/wenjiandm 三元组传给 download_document。例如意见陈述书通常为 ds=ZJWJ。\n" +
+      "  注意：审查信息后端有反爬(WAF)，偶发 400/404/412 属正常抖动。本工具已做分类级容错——\n" +
+      "      单分类失败会以 warnings 字段提示并返回其余文档；若整体失败请稍后重试 1-2 次。",
     input: props(COMMON_FIELDS),
     options: { namespace: "xcpquery" },
     execute: async (a) => {
       try {
-        const docs = _isForeign(a)
+        const res = _isForeign(a)
           ? await getAllDocumentsForeign(a.patent_no, a.country || "US", a.shenqinglsh, a.shenqinglx)
           : await getAllDocuments(a.patent_no, true);
-        return _toText({ patent_no: a.patent_no, count: docs.length, documents: docs });
+        const docs = Array.isArray(res) ? res : res.documents || [];
+        const warnings = Array.isArray(res) ? [] : res.warnings || [];
+        const payload: Record<string, unknown> = { patent_no: a.patent_no, count: docs.length, documents: docs };
+        if (warnings.length) payload.warnings = warnings;
+        return _toText(payload);
       } catch (e) {
         return `list_documents 失败: ${e.message}`;
       }
@@ -132,12 +143,19 @@ const TOOLS: ToolDef[] = [
   {
     name: "download_document",
     description:
-      "下载专利文档为 base64。国内：提供 list_documents 返回的 rid/ds/wenjiandm（is_scjd/anjianbh 用于复审无效审查决定）；国外：提供 list_documents 返回的 uri（rid/ds 不适用）。",
+      "下载专利文档为 base64（返回 {content:base64, mime, filename}）。\n" +
+      "国内：提供 list_documents 返回的 rid/ds/wenjiandm 三元组（is_scjd/anjianbh 仅用于复审无效审查决定文档）。\n" +
+      "国外：提供 list_documents 返回的 uri（rid/ds 不适用）。\n" +
+      "用法示例（国内意见陈述书）：\n" +
+      "  download_document(patent_no='2024106091101', rid='102026037313818', ds='ZJWJ', wenjiandm='100012', scope='domestic')\n" +
+      "  → ds 取值：SQWJ=申请文件, ZJWJ=中间文件(含意见陈述书), TZS=通知书；wenjiandm=文件代码。\n" +
+      "  rid/ds/wenjiandm 优先从 list_documents 输出取（不要手工编造）；若 list_documents 失败可稍后重试。\n" +
+      "  返回的 content 为 base64，可直接写文件（文件名建议用 {rid}.{由 mime 推断的扩展名}）。",
     input: props({
       patent_no: { type: "string", description: "专利号/公开号" },
       uri: { type: "string", description: "foreign 专用: 来自 list_documents 的文档 uri" },
       rid: { type: "string", description: "国内: list_documents 返回的 rid" },
-      ds: { type: "string", description: "国内: list_documents 返回的 ds" },
+      ds: { type: "string", description: "国内: list_documents 返回的 ds（SQWJ=申请文件/ZJWJ=中间文件/TZS=通知书）" },
       wenjiandm: { type: "string", description: "国内: 文件代码" },
       scope: SCOPE_FIELD,
       country: { type: "string", description: "foreign 专用: CN/EP/JP/KR/US" },

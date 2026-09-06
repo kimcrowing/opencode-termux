@@ -123,3 +123,18 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
   - 源码曾双份同步：`plugins/xcpquery/`（部署）↔ `project/rspss/xcpquery-plugin/`（源码），改完两边都要同步并 `node --check`；live opencode 需 kill→看门狗重拉才加载新代码。
   - 演进中的坑（勿回退）：曾试「fast-path 直接读浏览器 `localStorage.ACCESS_TOKEN` 跳 SSO」——只有 token 而无 WAF cookie/jar 就绪，反而让下载 412 重解更频繁（22s），**已回退**。结论：session 校验只信 Node 端 TOKEN + `loadSession()`；浏览器 token 由 `browserRequest` 在每次 `doFetch` 里现读（`browserEval(localStorage.ACCESS_TOKEN)`），无需在 `ensureSession` 里预判。
   - 曾误判：`bench_opt.mjs` 的 hot 段 13.39s 是**无 JWT 的 401 把 WP cookie 打没**的测试伪象，非真实流程。
+- **v2 插件部署目录实测（2026-09-06，`plugins/xcpquery/` = 本机部署，非仓库内）**：
+  - **结论更正**：`list_documents` 偶发的 `client error 400` **不是 WAF 抖动**，而是**真实的无数据栏目**：
+    `scxx/wxwj`（无效文件）、`scjd`（复审无效审查决定）对无相应程序/无审查决定的案件返回**真实的 400 空 body**。
+    cpqueryRequest 曾把「空 body 400」一律视同 WAF 重试 4 次（重解 WAF 也救不回真实 400）→ 耗尽抛错中断整个列表。当时误判为「WAF 抖动」是偷懒结论，已更正。
+  - **修复（core.mjs）**：cpqueryRequest 增加 `opts.emptyOk`——`emptyOk && status===400 && 空 body` 直接按空响应返回（不重试不抛错）；
+    getAllDocuments 的分类查询/子目录展开、getScjdTree 根查询都传 `emptyOk:true`；`obtain-init-treenodes`（树初始化前置）顶层失败降级为 warning 继续；分类级 try-catch 记 warnings。
+    412/带 HTML 的 400 仍按 WAF 重试，不受影响。
+  - **110 v1 的「正常下载」真相**：成功路径（deliverable_timed.mjs）**根本不走 list_documents 递归**，是 login → get_examination_tree → `download_document(rid/ds/wenjiandm)` 直连。
+    → 直连下载最稳；list_documents 只用于拿参数，失败也可用 `get_case_summary(发文信息)` 找线索后重试。
+  - **实测参数模板（2024106091101 意见陈述书）**：2025-12-31 那份 = `rid=102026037313818, ds=ZJWJ, wenjiandm=100012`；
+    2026-05-25 那份 = `rid=102026046383934, ds=ZJWJ, wenjiandm=100012`。`ds` 取值：SQWJ=申请文件 / ZJWJ=中间文件(含意见陈述书) / TZS=通知书。
+  - **下载验证**：本机 3 份 PDF 落盘 `/data/data/com.termux/files/usr/tmp/opencode/`（意见陈述书×2 + 第一次审查意见通知书）；
+    `意见陈述书_2025-12-31.pdf` md5=`2b7c92519283748b0e043b3a438c4798` 与 110 `first_opinion_2024106091101.pdf` **完全一致**。
+  - **参数使用示例已固化**：插件 `README.md`（标准工作流/参数模板/已知坑）+ server.ts 的 `list_documents`/`download_document` description（catalog 已生效）。
+  - 调试手法：改完 core.mjs 用独立 node 进程 `env LD_PRELOAD=libtermux-exec-ld-preload.so XCP_DEBUG=1 node dbg_list.mjs` 验证（execute 内插件工具会话可能加载旧代码，结论以独立进程为准）。

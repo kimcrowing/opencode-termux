@@ -496,8 +496,12 @@ async function rawPostJson(url, body, { auth = true, extra = {} } = {}) {
   return rawFetch("POST", url, JSON.stringify(body ?? {}), { auth, extra, follow: true });
 }
 
-async function cpqueryRequest(method, apiPath, params) {
+async function cpqueryRequest(method, apiPath, params, opts = {}) {
   // All cpquery data APIs are behind 瑞数 → route through headless browser.
+  // opts.emptyOk: 当为 true 时，400 空 body（无数据栏目，如「无效文件」wxwj /
+  // 「复审无效审查决定」scjd 对无相应程序的案件返回的真实 400）直接视为空响应返回，
+  // 不按 WAF 重试、不抛错——避免拖垮整个 list_documents（110 v1 实测结论）。
+  const emptyOk = !!opts.emptyOk;
   for (let attempt = 0; attempt < 4; attempt++) {
     let fullPath = apiPath;
     const headers = { "Content-Type": "application/json", Accept: "application/json, text/plain, */*" };
@@ -547,6 +551,12 @@ async function cpqueryRequest(method, apiPath, params) {
       // 视同 412：重解 WAF 后重试，尝试耗尽才抛错；不要在这之前直接放弃。
       // 另外：连续 412 挑战后反代会升级为「空 body 或 HTML body 的 400」（WAF 封禁特征），
       // 同样视同 WAF 问题重试；只有带 JSON body 的 400（真实参数错误）才直接抛错。
+      // —— 例外：emptyOk 时 400 空 body 是「无数据栏目」的真实响应（wxwj/scjd），
+      //    直接按空数据处理，不做无谓的 WAF 重解（实测：重解后仍 400，纯浪费）。
+      if (emptyOk && res.status === 400 && !text) {
+        if (process.env.XCP_DEBUG) console.error(`[xcp] ${res.status} 空 body → 视同无数据栏目（emptyOk）: ${apiPath}`);
+        return {};
+      }
       const looksWaf = res.status === 404 || !text || /^<!DOCTYPE|<html/i.test(text.trim());
       if (looksWaf) {
         invalidateWafCache();
@@ -778,7 +788,7 @@ async function getScjdTree(patentNo) {
   const root = await cpqueryRequest("POST", "/api/view/gn/scjd", {
     zhuanlisqh: patentNo,
     nodeId: "aj_gk_scjd",
-  });
+  }, { emptyOk: true });
   const categories = root.data || [];
   const result = {};
   for (const child of categories) {
@@ -823,8 +833,15 @@ async function getScjdTree(patentNo) {
 }
 async function getAllDocuments(patentNo, includeEmpty = true) {
   await ensureSession();
-  await cpqueryRequest("POST", "/api/view/gn/obtain-init-treenodes", { zhuanlisqh: patentNo });
+  // obtain-init-treenodes 是树初始化前置，偶发 400/412（WAF 抖动）——失败只告警，
+  // 不拖垮整个列表；scxx 分类查询本身就能拿到目录结构。
+  try {
+    await cpqueryRequest("POST", "/api/view/gn/obtain-init-treenodes", { zhuanlisqh: patentNo });
+  } catch (e) {
+    if (process.env.XCP_DEBUG) console.error(`[xcp] obtain-init-treenodes 失败（忽略，继续）: ${e.message}`);
+  }
   const result = [];
+  const warnings = [];
   const catsRaw = await cpqueryRequest("POST", "/api/view/gn/scxx", {
     zhuanlisqh: patentNo,
     nodeId: "aj_gk_scxx",
@@ -845,10 +862,16 @@ async function getAllDocuments(patentNo, includeEmpty = true) {
       if (isLeaf && rid && ds) {
         result.push({ name, rid, ds, wenjiandm: wjdm, category: catName, path: fullPath, is_scjd: false, anjianbh: "" });
       } else if (!isLeaf && nodeId && url) {
-        const body = { zhuanlisqh: patentNo, nodeId };
-        if (parentNodeId) body.parentNodeId = parentNodeId;
-        const children = (await cpqueryRequest("POST", url, body)).data || [];
-        if (children.length || includeEmpty) await recurse(children, catName, nodeId, fullPath);
+        // 单个子目录展开失败（无数据栏目 400/WAF 抖动）不应中断整个分类遍历，
+        // 记录 warning 后继续处理兄弟节点（参考 110 v1 的容错经验）。
+        try {
+          const body = { zhuanlisqh: patentNo, nodeId };
+          if (parentNodeId) body.parentNodeId = parentNodeId;
+          const children = (await cpqueryRequest("POST", url, body, { emptyOk: true })).data || [];
+          if (children.length || includeEmpty) await recurse(children, catName, nodeId, fullPath);
+        } catch (e) {
+          warnings.push(`分类「${catName}」子目录「${pathPrefix}」展开失败: ${e.message}`);
+        }
       }
     }
   }
@@ -856,25 +879,40 @@ async function getAllDocuments(patentNo, includeEmpty = true) {
     const urlPath = catInfo.url || "";
     const nodeId = catInfo.nodeId || "";
     if (!urlPath || !nodeId) continue;
-    const items = (await cpqueryRequest("POST", urlPath, { zhuanlisqh: patentNo, nodeId })).data || [];
-    await recurse(items, catName, nodeId, catName);
-  }
-  const scjd = await getScjdTree(patentNo);
-  for (const [catName, catData] of Object.entries(scjd)) {
-    for (const c of catData.cases || []) {
-      if (c.rid && c.ds)
-        result.push({
-          name: c.name || "",
-          rid: c.rid,
-          ds: c.ds,
-          wenjiandm: c.wenjiandm || "",
-          category: `复审无效审查决定/${catName}`,
-          path: `复审无效审查决定/${catName}/${c.name || ""}`,
-          is_scjd: true,
-          anjianbh: c.anjianbh || "",
-        });
+    // 分类级容错：一个分类查询失败不中断其余分类（尤其 WAF 抖动时）。
+    // wxwj（无效文件）/fswj（复审文件）对该案件无数据时返回 400 空 body，
+    // emptyOk 让它们直接按空栏目处理。
+    try {
+      const items = (await cpqueryRequest("POST", urlPath, { zhuanlisqh: patentNo, nodeId }, { emptyOk: true })).data || [];
+      await recurse(items, catName, nodeId, catName);
+    } catch (e) {
+      warnings.push(`分类「${catName}」查询失败: ${e.message}`);
     }
   }
+  // 复审无效审查决定（scjd）查询失败也仅告警，不拖垮整体列表——
+  // 大多数案件（如 2024106091101 复审中）根本没有审查决定文档，scjd 接口
+  // 对无案件或无决定的目录树返回 400 是已知现象（110 v1 实测）。
+  try {
+    const scjd = await getScjdTree(patentNo);
+    for (const [catName, catData] of Object.entries(scjd)) {
+      for (const c of catData.cases || []) {
+        if (c.rid && c.ds)
+          result.push({
+            name: c.name || "",
+            rid: c.rid,
+            ds: c.ds,
+            wenjiandm: c.wenjiandm || "",
+            category: `复审无效审查决定/${catName}`,
+            path: `复审无效审查决定/${catName}/${c.name || ""}`,
+            is_scjd: true,
+            anjianbh: c.anjianbh || "",
+          });
+      }
+    }
+  } catch (e) {
+    warnings.push(`复审无效审查决定(scjd)查询失败: ${e.message}`);
+  }
+  if (warnings.length) result.warnings = warnings;
   return result;
 }
 
