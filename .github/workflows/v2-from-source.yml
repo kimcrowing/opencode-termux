@@ -653,6 +653,14 @@ jobs:
           chmod +x tests/v2-plugin/verify-dingtalk.sh
           ./tests/v2-plugin/verify-dingtalk.sh "$BIN"
 
+      - name: Run auth-login v2 plugin verification
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
+          chmod +x tests/v2-plugin/verify-auth-login.sh
+          ./tests/v2-plugin/verify-auth-login.sh "$BIN"
+
   # ---------------------------------------------------------------------------
   # Stage 4: bundle
   #

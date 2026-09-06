@@ -12,7 +12,7 @@
 #   2. opencode.provider.codebuddy is registered as a builtin provider and
 #      active (catches patched-source regressions like a patch that ships
 #      provider/codebuddy.ts but forgets the ProviderPlugins registration).
-#   3. Every shipped plugin (dingtalk / uyanip / xcpquery) loads from its
+#   3. Every shipped plugin (dingtalk / uyanip / xcpquery / auth-login) loads from its
 #      src/v2-plugin package, is registered as a local plugin and is active.
 #
 # The binary under test is expected at $1 and must be executable.
@@ -31,6 +31,7 @@ declare -A PLUGINS
 PLUGINS[dingtalk]="$REPO_ROOT/src/v2-plugin/dingtalk"
 PLUGINS[uyanip]="$REPO_ROOT/src/v2-plugin/uyanip"
 PLUGINS[xcpquery]="$REPO_ROOT/src/v2-plugin/xcpquery"
+PLUGINS[auth-login]="$REPO_ROOT/src/v2-plugin/auth-login"
 for id in "${!PLUGINS[@]}"; do
   if [[ ! -f "${PLUGINS[$id]}/server.ts" ]]; then
     echo "::error::missing v2 plugin source: ${PLUGINS[$id]}/server.ts"
@@ -165,4 +166,4 @@ if [[ "$FAILURES" -ne 0 ]]; then
   echo "::error::plugin verification FAILED"
   exit 1
 fi
-echo "::notice::plugin verification PASSED (codebuddy + dingtalk + uyanip + xcpquery active, no non-active plugins)"
+echo "::notice::plugin verification PASSED (codebuddy + dingtalk + uyanip + xcpquery + auth-login active, no non-active plugins)"

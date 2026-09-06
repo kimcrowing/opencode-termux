@@ -34,3 +34,6 @@ tmp/
 
 # Runtime plugin state (uyanip keeps an HTTP session token next to server.ts)
 src/v2-plugin/*/session.json
+
+# auth-login 插件运行时扫码登录态/二维码（含 token，禁止入库）
+src/v2-plugin/auth-login/storage/

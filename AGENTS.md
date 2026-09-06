@@ -30,6 +30,12 @@
   - 应急：`GET /actions/caches` 找条目 → `DELETE /actions/caches/<id>` 强制重装（run 33949778927 删后一次修复）。
   - 已加固（commit `0b9a4ac`）：key 改为 `v2-verify-install-${{runner.os}}-${{steps.sha.outputs.sha}}-${{hashFiles(bun.lock)}}`（clone 步加 `id: sha`）。同类 `v2-bun-install` / `v2-web-install` 仍只哈希 bun.lock，同症状同样处理。
 
+### 上游源码实证：codebuddy/gateway 补丁内容**不在**上游（2026-09-06 复核）
+- **"上游 beta"= `https://github.com/anomalyco/opencode.git` 的 `beta` 分支**（workflow `v2-from-source.yml` clone 步硬编码，非 kimcrowing/opencode-termux）。
+- 线上复核（GitHub API `contents/packages/core/src/plugin/provider?ref=beta`，HEAD b2cecc63 = 构建产物 `.built-sha`）：**无 `codebuddy.ts`、无 `gateway-config.ts`、无 `gateway/` 目录、无 `docs/`**。上游原生只有 `gateway.ts`（303B shim）、`llmgateway.ts`、`cloudflare-ai-gateway.ts`——与补丁的 codebuddy/gateway provider 无关。
+- **"在本机/缓存树里看到 codebuddy.ts、gateway-* 等文件 = 已打补丁的 dirty 工作树残留**（`git status` 显示 `?? docs/`、`?? codebuddy.ts`、`?? gateway-config.ts`、`?? gateway/` + 3 个 M），曾因clone/restore 复用了打过补丁的树所致。`checkout --force HEAD -- packages/core packages/schema` + `git clean -fd -- packages/core packages/schema docs` 后全部消失 → 证实这些文件从不是上游内容，只是补丁 new file 残留。
+- 推论：补丁冲突根因**不是**"上游吸收了补丁"，而是**缓存/工作树毒化**（apply 前未清干净 untracked new file → `already exists`）。修复 commit `848d7d5` 对症，run `34029607479` 已全绿。
+
 ### 历史构建线（自建链，已废弃，留档）
 - 曾以 `build.yml` 自建 Bun/WebKit/ICU/TinyCC 链，后改用 `from-source.yml`（官方 Bun 1.4）为主力，自建链脚本已 `git rm`（commit `52676ba`）。
 - **opencode 源码版本耦合**：v1.17.9 起 TUI worker 从 `cli/cmd/tui/worker.ts` 迁到 `cli/tui/worker.ts`；`scripts/build-opencode-android.ts` 已改为 `fs.existsSync` 探测新旧两路径。
@@ -49,6 +55,11 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 | xcpquery | `0b9a4ac` | 33953149902 | 7 | ✅ PASSED |
 | dingtalk | `3f0932b` | 33954486202 | 12 | ✅ PASSED |
 | voice | — | — | — | 用户要求延后（契约已探明，见下） |
+| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 10 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`），CI 验证步已加入 workflow |
+
+> **auth-login**：通用扫码登录框架（QR 生成→web UI 呈现→后台轮询→token 持久化→可配置活动执行器），
+> GitCode 为第一个接入站点（配置驱动，网页扫码端点待抓包确认）。见
+> `src/v2-plugin/auth-login/AGENTS.md`。
 
 ### v2 插件核心契约（实测硬结论）
 - `setup(ctx)` 里 `ctx.tool.transform(cb)` 的**回调在插件宿主 worker 运行（独立 global 作用域）**：回调内对外层闭包数组/变量的修改**在 setup 的 `await` 之后不可见**（探针 `sameGlobal:false` 证实）；回调内的副作用（写文件、`editor.list()`）**可见且含 host 全部内置工具**。
@@ -82,8 +93,8 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 - `PromptInput.Prompt = { text, files?, agents?, skills? }` —— 扁平 `text`，**无 `parts`、无 per-request `system`**。
 
 ### 验证脚本与 sentinel 约定
-- `tests/v2-plugin/verify.sh <linux-binary>` 全插件验证（codebuddy provider + 三个工具插件 dingtalk/uyanip/xcpquery 全部注册且 active，且 `/api/plugin` 无任何非 active 状态）；专项脚本 `verify-uyanip.sh` / `verify-xcpquery.sh` / `verify-dingtalk.sh`（各自断言 host 合成工具 id），参数都是二进制路径。
-- 端口：uyanip `41844` / xcpquery `41845` / dingtalk `41846`（可用 `V2_<NAME>_PORT` 覆盖）。
+- `tests/v2-plugin/verify.sh <linux-binary>` 全插件验证（codebuddy provider + 四个工具插件 dingtalk/uyanip/xcpquery/auth-login 全部注册且 active，且 `/api/plugin` 无任何非 active 状态）；专项脚本 `verify-uyanip.sh` / `verify-xcpquery.sh` / `verify-dingtalk.sh` / `verify-auth-login.sh`（各自断言 host 合成工具 id），参数都是二进制路径。
+- 端口：uyanip `41844` / xcpquery `41845` / dingtalk `41846` / auth-login `41847`（可用 `V2_<NAME>_PORT` 覆盖）。
 - sentinel env：`UYANIP_VERIFY_SENTINEL` / `XCPQUERY_VERIFY_SENTINEL` / `DINGTALK_VERIFY_SENTINEL`；脚本内 `PASSWORD="${V2_PASSWORD:-opencode-verify-password}"`。
 - 工作流在 ubuntu runner 上 `bun install` 后 build linux-x64 二进制（`--skip-web-ui --skip-install`）再跑。
 
@@ -98,7 +109,7 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
   `LD_PRELOAD=~/.opencode/libtagfix.so:~/.opencode/libseccomp_shim.so LD_LIBRARY_PATH=~/.opencode TMPDIR=<tmp> env -u OPENCODE_PASSWORD OPENCODE_SERVER_PASSWORD=<pwd> <bin> serve --hostname 127.0.0.1 --port <空闲高位端口>`
   （tagfix 必带否则 `Bad system call`；`env -u` 必须排在所有 `NAME=VALUE` 之前。）
 - 判就绪用 `/api/config`（此版 `/api/global/health` 返回空）。
-- `tests/v2-plugin/verify.sh`（通用）+ `verify-{uyanip,xcpquery,dingtalk}.sh`（专项，参数 = 二进制路径，端口 41844/41845/41846）；脚本里 `LD_PRELOAD=` 是给 CI 用的，**本机跑需换成 tagfix**（可用 `tmp/mk_local_verify*.py` 生成 wrapper，并把 `REPO_ROOT` 写死）。
+- `tests/v2-plugin/verify.sh`（通用）+ `verify-{uyanip,xcpquery,dingtalk,auth-login}.sh`（专项，参数 = 二进制路径，端口 41844/41845/41846/41847）；脚本里 `LD_PRELOAD=` 是给 CI 用的，**本机跑需换成 tagfix**（可用 `tmp/mk_local_verify*.py` 生成 wrapper，并把 `REPO_ROOT` 写死）。auth-login 本机冒烟用 `tmp/opencode/auth_smoke2.sh`。
 - 探针套路：`tmp/{voiceprobe,bridgeprobe,bridgeprobe2,wsprobe,dtprobe}/server.ts`（目录插件 + env 输出 JSON）。
 
 ## 4. 其他项目相关
