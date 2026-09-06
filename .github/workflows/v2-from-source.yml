@@ -261,25 +261,31 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ steps.ref.outputs.ref }}"
-          if [ -d build/opencode-src/.git ]; then
-            echo "upstream checkout exists, refreshing"
-            git -C build/opencode-src fetch --depth 1 origin "$REF" || true
-            git -C build/opencode-src checkout --force FETCH_HEAD || true
-          else
-            mkdir -p build
-            git clone --depth 1 --branch "$REF" \
-              https://github.com/anomalyco/opencode.git build/opencode-src
+          mkdir -p build
+          if [ ! -d build/opencode-src/.git ]; then
+            git init -q build/opencode-src
+            git -C build/opencode-src remote add origin \
+              https://github.com/anomalyco/opencode.git
           fi
-          SHA="$(git -C build/opencode-src rev-parse HEAD 2>/dev/null || true)"
+          git -C build/opencode-src remote set-url origin \
+            https://github.com/anomalyco/opencode.git
+          git -C build/opencode-src fetch --depth 1 origin "$REF"
+          git -C build/opencode-src checkout --force FETCH_HEAD
+          SHA="$(git -C build/opencode-src rev-parse HEAD)"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          test -n "$SHA" || { echo "::error::empty upstream SHA"; exit 1; }
+          echo "::notice::upstream HEAD: $SHA"
 
       - name: Cache bun install
         id: cache-install
         uses: actions/cache@v5
         with:
           path: build/opencode-src/node_modules
-          key: v2-web-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+          # The upstream SHA alone does not protect against a republished tarball
+          # (same version, new export map) under that SHA, which breaks the build
+          # with `preload not found "@opentui/solid/preload"`. Include the fork
+          # commit so our workflow changes force one fresh install and pin the
+          # cache to this workflow era.
+          key: v2-web-install-${{ runner.os }}-${{ steps.clone.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}-${{ github.sha }}
 
       - name: Install dependencies
         if: steps.cache-install.outputs.cache-hit != 'true'
@@ -387,7 +393,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/opencode-src/node_modules
-          key: v2-bun-install-${{ runner.os }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+          # Same staleness guard as build-web-assets: republished tarballs within
+          # a single upstream SHA kept restoring a stale node_modules that broke
+          # the build with `preload not found "@opentui/solid/preload"`.
+          key: v2-bun-install-${{ runner.os }}-${{ steps.sha.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}-${{ github.sha }}
 
       - name: Download libopentui.so
         uses: actions/download-artifact@v5
@@ -539,7 +548,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: build/opencode-src/node_modules
-          key: v2-verify-install-${{ runner.os }}-${{ steps.sha.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}
+          # Same staleness guard as the android build: a republished tarball
+          # under a single upstream SHA (same bun.lock hash) broke the linux
+          # build with `preload not found "@opentui/solid/preload"`.
+          key: v2-verify-install-${{ runner.os }}-${{ steps.sha.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}-${{ github.sha }}
 
       - name: Install dependencies
         if: steps.cache-install.outputs.cache-hit != 'true'
