@@ -20,10 +20,10 @@ index 18ef4e9..2542d70 100644
    CoherePlugin,
 diff --git a/packages/core/src/plugin/provider/codebuddy.ts b/packages/core/src/plugin/provider/codebuddy.ts
 new file mode 100644
-index 0000000..90f96e5
+index 0000000..bddca32
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/codebuddy.ts
-@@ -0,0 +1,1063 @@
+@@ -0,0 +1,1070 @@
 +// CodeBuddy (Tencent) provider plugin for opencode v2.
 +//
 +// Ported from the classic v1 `codebuddy-auth` plugin (Kim's PC config) onto the
@@ -292,6 +292,7 @@ index 0000000..90f96e5
 +}
 +
 +let reasoningModelIds = new Set<string>()
++let freeExhaustedUntil = 0
 +
 +async function fetchRemoteModels(serverUrl: string, domain: string, accessToken: string): Promise<RemoteModel[]> {
 +  const headers: Record<string, string> = {
@@ -631,6 +632,12 @@ index 0000000..90f96e5
 +  return { status: resp.status, payload }
 +}
 +
++// KV.Service methods are Effects, not promises. These helpers let the
++// plain-async checkin functions persist state without jumping into Effect.
++const kvSet = (kv: KV.Interface, key: string, value: Record<string, unknown>) =>
++  Effect.runPromise(kv.set(key, value))
++const kvGet = (kv: KV.Interface, key: string) => Effect.runPromise(kv.get(key))
++
 +async function attemptCheckin(
 +  kv: KV.Interface,
 +  base: string,
@@ -648,7 +655,7 @@ index 0000000..90f96e5
 +    if (!data) return ""
 +    return ` (今日+${data.today_credit ?? 0} 累计${data.total_credits ?? 0})`
 +  }
-+  await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString() })
++  await kvSet(kv, `codebuddy.checkin.${uid}`, { lastAttempt: localDateString() })
 +  try {
 +    let activity: any = null
 +    try {
@@ -657,14 +664,14 @@ index 0000000..90f96e5
 +    } catch {}
 +
 +    if (activity && isCredited(activity.data)) {
-+      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      await kvSet(kv, `codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
 +      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 今日已签到${logCredits(activity.data)}`)
 +      return
 +    }
 +
 +    const claim = await postCheckin(base, CHECKIN_PATH_CLAIM, accessToken, domain)
 +    if (claim.status === 401 || claim.status === 403) {
-+      await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `claim ${claim.status}` })
++      await kvSet(kv, `codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `claim ${claim.status}` })
 +      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] skipped: token rejected (${claim.status})`)
 +      return
 +    }
@@ -675,12 +682,12 @@ index 0000000..90f96e5
 +    } catch {}
 +
 +    if (after && isCredited(after)) {
-+      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      await kvSet(kv, `codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
 +      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 签到成功${logCredits(after)}`)
 +      return
 +    }
 +    if (isAlreadyCheckedIn(claim.payload)) {
-+      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      await kvSet(kv, `codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
 +      if (!CONFIG.quiet) console.log("[codebuddy][checkin] 今日已签到")
 +      return
 +    }
@@ -688,12 +695,12 @@ index 0000000..90f96e5
 +    if (!activity) {
 +      const st = await postCheckin(base, CHECKIN_PATH_STATUS, accessToken, domain)
 +      if (st.status === 401 || st.status === 403) {
-+        await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `status ${st.status}` })
++        await kvSet(kv, `codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `status ${st.status}` })
 +        if (!CONFIG.quiet) console.log(`[codebuddy][checkin] skipped: token rejected (${st.status})`)
 +        return
 +      }
 +      if (isAlreadyCheckedIn(st.payload)) {
-+        await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++        await kvSet(kv, `codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
 +        if (!CONFIG.quiet) console.log("[codebuddy][checkin] 今日已签到")
 +        return
 +      }
@@ -701,16 +708,16 @@ index 0000000..90f96e5
 +
 +    if (claim.payload && claim.payload.code === 0) {
 +      const credit = claim.payload.data?.credit ?? claim.payload.data?.today_credit ?? claim.payload.data?.points
-+      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      await kvSet(kv, `codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
 +      if (!CONFIG.quiet)
 +        console.log(`[codebuddy][checkin] 签到成功${credit != null ? ` credit=${credit}` : ""}`)
 +      return
 +    }
 +    const errMsg = claim.payload?.msg || claim.payload?.message || `http ${claim.status}`
-+    await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(errMsg) })
++    await kvSet(kv, `codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(errMsg) })
 +    if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 签到失败: ${errMsg}`)
 +  } catch (e: any) {
-+    await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(e?.message || e) })
++    await kvSet(kv, `codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(e?.message || e) })
 +    if (!CONFIG.quiet) console.log(`[codebuddy][checkin] error: ${e?.message || e}`)
 +  }
 +}
@@ -722,11 +729,11 @@ index 0000000..90f96e5
 +}
 +
 +async function checkinState(kv: KV.Interface, uid: string): Promise<CheckinState> {
-+  const value = await kv.get(`codebuddy.checkin.${uid}`)
++  const value = await kvGet(kv, `codebuddy.checkin.${uid}`)
 +  return value && typeof value === "object" ? (value as CheckinState) : {}
 +}
 +
-+function maybeDailyCheckin(kv: KV.Interface, credentials: readonly Credential.Info[]) {
++function maybeDailyCheckin(kv: KV.Interface, credentials: readonly Credential.Info[], getDomain: () => string) {
 +  return Effect.gen(function* () {
 +    if (!CONFIG.checkinEnabled) return
 +    const today = localDateString()
@@ -735,7 +742,7 @@ index 0000000..90f96e5
 +      const uid = String(credential.value.metadata?.uid || resolveUserId(credential.value.access) || "_anon")
 +      const state = yield* checkinStateEffect(kv, uid)
 +      if (state.lastSuccess === today || state.lastAttempt === today) continue
-+      yield* Effect.tryPromise({ try: () => attemptCheckin(kv, CONFIG.checkinBase, domain, credential.value.access, uid) })
++      yield* Effect.tryPromise({ try: () => attemptCheckin(kv, CONFIG.checkinBase, getDomain(), credential.value.access, uid) })
 +    }
 +  })
 +}
@@ -793,7 +800,7 @@ index 0000000..90f96e5
 +      semaphore.withPermit(load().pipe(Effect.andThen(ctx.catalog.reload())))
 +    // Startup discovery must not block plugin activation on the network.
 +    yield* refresh().pipe(Effect.forkScoped)
-+    yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID)).pipe(Effect.forkScoped)
++    yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID), () => resolvedDomain).pipe(Effect.forkScoped)
 +
 +    yield* ctx.integration.transform((editor) => {
 +      editor.method.remove(integrationID, { type: "key" })
@@ -825,7 +832,7 @@ index 0000000..90f96e5
 +      Stream.filter((event) => event.data.integrationID === integrationID),
 +      Stream.runForEach(() =>
 +        Effect.gen(function* () {
-+          yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID))
++          yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID), () => resolvedDomain)
 +          yield* refresh().pipe(Effect.forkScoped)
 +        }),
 +      ),
