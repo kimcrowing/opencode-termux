@@ -12,7 +12,9 @@ name: v2 from-source
 #     nearly free, and editing one script only invalidates that stage.
 #
 # Stages:
-#   1. build-libopentui  -> libopentui.so (Zig + NDK, the memory-heavy step)
+#   1. build-libopentui  -> libopentui.so (Zig + NDK, the memory-heavy step;
+#                           OPTIONAL - only needed to run the TUI interactively,
+#                           not for `serve`/server+plugin headless mode)
 #   2. build-web-assets  -> embedded web UI archive (Vite; cached by upstream SHA)
 #   3. build-opencode2   -> opencode2 binary (Bun bundle for android)
 #   4. package           -> shippable archive
@@ -29,6 +31,11 @@ on:
         description: "Skip building the embedded web UI (faster, TUI-only binary)"
         required: false
         default: false
+        type: boolean
+      skip_opentui:
+        description: "Skip building libopentui.so (TUI renderer). Termux runs opencode2 headless (serve), so the native TUI lib is not needed and this skips the heaviest Zig/NDK stage."
+        required: false
+        default: true
         type: boolean
 
 permissions:
@@ -51,13 +58,18 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1: libopentui.so
+  # Stage 1: libopentui.so (OPTIONAL)
   #
   # The heaviest native step and the one most likely to break when opentui
   # changes, so it is isolated. Produces the OTUI_ASSET_ROOT tree that lets
   # @opentui/core load a native library on a platform it has no prebuild for.
+  #
+  # Skipped by default (skip_opentui=true): Termux runs `opencode2 serve`
+  # headless, so the TUI renderer is never loaded. Enable it only when you want
+  # to use the interactive TUI on device.
   # ---------------------------------------------------------------------------
   build-libopentui:
+    if: ${{ !inputs.skip_opentui }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -328,6 +340,9 @@ jobs:
   # ---------------------------------------------------------------------------
   build-opencode2:
     needs: [build-libopentui, build-web-assets]
+    # build-libopentui is optional (skip_opentui), so accept it being skipped;
+    # any other failure still halts this job.
+    if: ${{ !cancelled() && needs.build-libopentui.result != 'failure' && needs.build-web-assets.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -414,6 +429,7 @@ jobs:
           key: v2-bun-install-${{ runner.os }}-${{ steps.sha.outputs.sha }}-${{ hashFiles('build/opencode-src/bun.lock') }}-${{ github.sha }}
 
       - name: Download libopentui.so
+        if: ${{ !inputs.skip_opentui }}
         uses: actions/download-artifact@v5
         with:
           name: libopentui-android
@@ -636,6 +652,9 @@ jobs:
   # ---------------------------------------------------------------------------
   package:
     needs: [build-libopentui, build-compat-libs, build-opencode2]
+    # build-libopentui is optional (skip_opentui), so accept it being skipped;
+    # any other failure still halts this job.
+    if: ${{ !cancelled() && needs.build-libopentui.result != 'failure' && needs.build-compat-libs.result == 'success' && needs.build-opencode2.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -647,6 +666,7 @@ jobs:
           path: package/bin
 
       - name: Download libopentui.so
+        if: ${{ !inputs.skip_opentui }}
         uses: actions/download-artifact@v5
         with:
           name: libopentui-android

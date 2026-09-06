@@ -12,8 +12,8 @@
 
 ## 2. CI 工作流
 - workflow id `350638463`（`v2-from-source.yml`）；dispatch：
-  `POST .../actions/workflows/350638463/dispatches` body `{"ref":"v2","inputs":{"upstream_ref":"beta","skip_web_ui":"false"}}`
-- 上游 `anomalyco/opencode@beta`；6 个 job（build-compat-libs / build-web-assets / build-libopentui / build-opencode2 / package / verify-v2-plugin），全绿约 4–6 分钟。
+  `POST .../actions/workflows/350638463/dispatches` body `{"ref":"v2","inputs":{"upstream_ref":"beta","skip_web_ui":"false","skip_opentui":"true"}}`
+- 上游 `anomalyco/opencode@beta`；6 个 job（build-compat-libs / build-web-assets / build-libopentui / build-opencode2 / package / verify-v2-plugin），全绿约 4–6 分钟。`build-libopentui` 默认被 `skip_opentui=true` 跳过（Termux serve 模式不用 TUI），跳过时 `build-opencode2`/`package` 的 `needs` 用 job 级 `if` 放行。
 - 查结果：`GET .../actions/runs/{run_id}`（轮询 status/conclusion）；抓日志：`GET .../actions/jobs/{job_id}/logs` 取 `location:` 签名 URL 再下载 zip。
 
 ### workflow 语义坑（实测）
