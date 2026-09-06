@@ -249,6 +249,7 @@ function extractText(message: any): string {
 }
 
 let state: any = null;
+let _streamStarted = false;
 
 export default {
   id: "dingtalk",
@@ -302,10 +303,16 @@ export default {
     }
 
     if (clientId && clientSecret) {
-      try {
-        startStream(state);
-      } catch {
-        // 收消息 WS 启动失败不影响发消息工具
+      // OpenCode v2 会对全局插件按位置加载两次（服务启动 + 位置激活），同一进程内
+      // setup 可能运行多次。用模块级哨兵保证 startStream 的收消息 WS 全局只起一条，
+      // 避免钉钉消息被双连接重复注册/重复处理。
+      if (!_streamStarted) {
+        _streamStarted = true;
+        try {
+          startStream(state);
+        } catch {
+          // 收消息 WS 启动失败不影响发消息工具
+        }
       }
     }
 
