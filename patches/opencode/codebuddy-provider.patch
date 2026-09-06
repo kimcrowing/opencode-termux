@@ -1,36 +1,17 @@
-diff --git a/packages/core/src/plugin/provider.ts b/packages/core/src/plugin/provider.ts
-index 18ef4e9..2542d70 100644
---- a/packages/core/src/plugin/provider.ts
-+++ b/packages/core/src/plugin/provider.ts
-@@ -3,6 +3,7 @@ import { AmazonBedrockPlugin } from "./provider/amazon-bedrock.js"
- import { AnthropicPlugin } from "./provider/anthropic.js"
- import { AzurePlugin } from "./provider/azure.js"
- import { CerebrasPlugin } from "./provider/cerebras.js"
-+import { CodeBuddyPlugin } from "./provider/codebuddy.js"
- import { CloudflareAIGatewayPlugin } from "./provider/cloudflare-ai-gateway.js"
- import { CloudflareWorkersAIPlugin } from "./provider/cloudflare-workers-ai.js"
- import { CoherePlugin } from "./provider/cohere.js"
-@@ -38,6 +39,7 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
-   AnthropicPlugin,
-   AzurePlugin,
-   CerebrasPlugin,
-+  CodeBuddyPlugin,
-   CloudflareAIGatewayPlugin,
-   CloudflareWorkersAIPlugin,
-   CoherePlugin,
 diff --git a/packages/core/src/plugin/provider/codebuddy.ts b/packages/core/src/plugin/provider/codebuddy.ts
 new file mode 100644
-index 0000000..bddca32
+index 0000000..d09bb39
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/codebuddy.ts
-@@ -0,0 +1,1070 @@
+@@ -0,0 +1,1078 @@
 +// CodeBuddy (Tencent) provider plugin for opencode v2.
 +//
 +// Ported from the classic v1 `codebuddy-auth` plugin (Kim's PC config) onto the
 +// v2 internal-plugin surface:
-+//   - Credentials are stored with the native v2 Credential service. Every row of
-+//     integration "codebuddy" is one account; the ACTIVE row (list()[0]) is the
-+//     primary. Rotation calls Credential.Service.activate, publish Event.Switched.
++//   - Credentials are stored with the native v2 Credential service. The plugin
++//     only ever sees the ACTIVE credential via ctx.integration.connection
++//     (active + resolve, mirroring github-copilot). A new IOA login creates a
++//     credential and makes it active; "switching accounts" = re-login.
 +//   - The AI SDK route bypasses session.hook("http.request"), so the only safe
 +//     interception point is evt.options.fetch in the "sdk" hook. The default
 +//     OpenAICompatiblePlugin builds createOpenAICompatible(evt.options), so we
@@ -77,7 +58,6 @@ index 0000000..bddca32
 +  quiet: process.env.CODEBUDDY_QUIET !== "0",
 +}
 +
-+const ACCOUNT_ROTATION_ENABLED = (process.env.CODEBUDDY_ACCOUNT_ROTATION ?? "1") !== "0"
 +const QUOTA_HINTS = (process.env.CODEBUDDY_QUOTA_KEYWORDS || "额度,quota,限额,用量,exhausted,limit reached,次数,insufficient,rate limit")
 +  .split(",")
 +  .map((s) => s.trim().toLowerCase())
@@ -733,17 +713,20 @@ index 0000000..bddca32
 +  return value && typeof value === "object" ? (value as CheckinState) : {}
 +}
 +
-+function maybeDailyCheckin(kv: KV.Interface, credentials: readonly Credential.Info[], getDomain: () => string) {
++function maybeDailyCheckin(
++  kv: KV.Interface,
++  getActive: Effect.Effect<Credential.OAuth | undefined, never>,
++  getDomain: () => string,
++) {
 +  return Effect.gen(function* () {
 +    if (!CONFIG.checkinEnabled) return
++    const credential = yield* getActive
++    if (!credential?.access) return
 +    const today = localDateString()
-+    for (const credential of credentials) {
-+      if (credential.value.type !== "oauth" || !credential.value.access) continue
-+      const uid = String(credential.value.metadata?.uid || resolveUserId(credential.value.access) || "_anon")
-+      const state = yield* checkinStateEffect(kv, uid)
-+      if (state.lastSuccess === today || state.lastAttempt === today) continue
-+      yield* Effect.tryPromise({ try: () => attemptCheckin(kv, CONFIG.checkinBase, getDomain(), credential.value.access, uid) })
-+    }
++    const uid = String(credential.metadata?.uid || resolveUserId(credential.access) || "_anon")
++    const state = yield* checkinStateEffect(kv, uid)
++    if (state.lastSuccess === today || state.lastAttempt === today) return
++    yield* Effect.tryPromise({ try: () => attemptCheckin(kv, CONFIG.checkinBase, getDomain(), credential.access, uid) })
 +  })
 +}
 +
@@ -760,29 +743,41 @@ index 0000000..bddca32
 +    const kv = yield* KV.Service
 +    const semaphore = Semaphore.makeUnsafe(1)
 +
-+    // Capture the active services so the plain-async fetch closure (called by the
-+    // AI SDK outside Effect) can still query/rotate/update the credential pool.
-+    const context = yield* Effect.context<Credential.Service>()
-+    const runCredential = Effect.runPromiseWith(context)
++    // Capture the plugin host context so the plain-async fetch closure (called by
++    // the AI SDK outside Effect) can still resolve the active connection.
++    const pluginContext = yield* Effect.context<PluginInternal>()
++    const runInPlugin = Effect.runPromiseWith(pluginContext)
 +
 +    // Resolved server/domain, updated from configured model baseURLs.
 +    let resolvedServerUrl = CONFIG.serverUrl
 +    let resolvedDomain = CONFIG.domain
 +
++    // The ONLY credential the plugin can see is the active one: the connection
++    // API exposes active() + resolve() (mirroring github-copilot), never the
++    // pool. Core owns the pool — a new login creates a credential and makes it
++    // the active one, publishing Credential.Event.Switched.
++    const getActive = Effect.fn("CodeBuddyPlugin.active")(function* () {
++      const connection = yield* ctx.integration.connection.active(integrationID)
++      if (!connection) return undefined
++      const credential = yield* ctx.integration.connection
++        .resolve(connection)
++        .pipe(Effect.orElseSucceed(() => undefined))
++      return credential?.type === "oauth" ? credential : undefined
++    })
++
 +    // Current seed models; refreshed by remote discovery once a credential exists.
 +    const loaded: { models?: Map<Model.ID, Model.Info> } = {}
 +
 +    const load = Effect.fn("CodeBuddyPlugin.load")(function* () {
-+      const pool = yield* Credential.Service.list(integrationID)
-+      const active = pool[0]
-+      if (active?.value.type !== "oauth" || !active.value.access) {
++      const active = yield* getActive
++      if (!active?.access) {
 +        loaded.models = undefined
 +        return
 +      }
 +      const discovered = yield* Effect.tryPromise({
 +        try: () =>
 +          Promise.race([
-+            fetchRemoteModels(resolvedServerUrl, resolvedDomain, active.value.access),
++            fetchRemoteModels(resolvedServerUrl, resolvedDomain, active.access),
 +            new Promise<RemoteModel[]>((resolve) => setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS)),
 +          ]),
 +        catch: (cause) => cause,
@@ -800,7 +795,7 @@ index 0000000..bddca32
 +      semaphore.withPermit(load().pipe(Effect.andThen(ctx.catalog.reload())))
 +    // Startup discovery must not block plugin activation on the network.
 +    yield* refresh().pipe(Effect.forkScoped)
-+    yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID), () => resolvedDomain).pipe(Effect.forkScoped)
++    yield* maybeDailyCheckin(kv, getActive, () => resolvedDomain).pipe(Effect.forkScoped)
 +
 +    yield* ctx.integration.transform((editor) => {
 +      editor.method.remove(integrationID, { type: "key" })
@@ -827,12 +822,12 @@ index 0000000..bddca32
 +    })
 +
 +    // Re-run model discovery and daily check-in when the active account changes
-+    // (login of a new account, rotation, or removal).
++    // (a new login, which is how the user switches accounts in v2).
 +    yield* bus.subscribe(Credential.Event.Switched).pipe(
 +      Stream.filter((event) => event.data.integrationID === integrationID),
 +      Stream.runForEach(() =>
 +        Effect.gen(function* () {
-+          yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID), () => resolvedDomain)
++          yield* maybeDailyCheckin(kv, getActive, () => resolvedDomain)
 +          yield* refresh().pipe(Effect.forkScoped)
 +        }),
 +      ),
@@ -856,7 +851,8 @@ index 0000000..bddca32
 +        }
 +        evt.options.baseURL = `${resolvedServerUrl}/v2`
 +        evt.options.fetch = codebuddyFetch({
-+          runCredential,
++          kv,
++          getActive: () => runInPlugin(getActive),
 +          getServerUrl: () => resolvedServerUrl,
 +          getDomain: () => resolvedDomain,
 +        })
@@ -866,13 +862,14 @@ index 0000000..bddca32
 +} satisfies PluginInternal.InternalPlugin)
 +
 +interface FetchEnv {
-+  runCredential: <A, E>(effect: Effect.Effect<A, E, Credential.Service>) => Promise<A>
++  kv: KV.Interface
++  getActive: () => Promise<Credential.OAuth | undefined>
 +  getServerUrl: () => string
 +  getDomain: () => string
 +}
 +
-+// The chat request engine. Reads the live credential pool on every request, so
-+// account switches/rotations never need an SDK rebuild: the pool is never cached.
++// The chat request engine. Resolves the active connection fresh on every
++// request, so a re-login mid-session is picked up without an SDK rebuild.
 +function codebuddyFetch(env: FetchEnv) {
 +  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 +    const urlStr = String(input)
@@ -881,14 +878,14 @@ index 0000000..bddca32
 +    const serverUrl = env.getServerUrl()
 +    const domain = env.getDomain()
 +
-+    // Resolve account pool (active first). Every entry keeps its credential id so
-+    // we can persist rotations/refreshes through the Credential service.
-+    const pool = (await env.runCredential(Credential.Service.list(integrationID))).map((cred) => ({
-+      info: cred,
-+      value: cred.value.type === "oauth" ? cred.value : undefined,
-+    }))
-+    const accounts = pool.filter((entry): entry is { info: Credential.Info; value: Credential.OAuth } => entry.value !== undefined)
-+    if (accounts.length === 0) throw new Error("缺少 access token，请重新登录")
++    let active: Credential.OAuth | undefined
++    try {
++      active = await env.getActive()
++    } catch {}
++    if (!active?.access) throw new Error("缺少 access token，请重新登录")
++    let cur: Credential.OAuth = active
++    const label = resolveAccountLabel(cur.access)
++    const uid = String(resolveUserId(cur.access) || "_anon")
 +
 +    const body = init?.body
 +    if (!body) {
@@ -901,14 +898,30 @@ index 0000000..bddca32
 +    const resolvedModel = resolveModel(openaiRequest.model)
 +    if (!resolvedModel) throw new Error("未设置模型，请设置 CODEBUDDY_DEFAULT_MODEL 或在 OpenCode 选择模型")
 +
-+    const startIdx = 0 // list() returns the ACTIVE account first
-+    const buildOrder = () => {
-+      const order: typeof accounts = []
-+      for (let k = 0; k < accounts.length; k++) {
-+        const idx = (startIdx + k) % accounts.length
-+        if (idx >= 0 && !order.includes(accounts[idx])) order.push(accounts[idx])
++    // A successful IOA refresh returns a NEW refresh token. The plugin cannot
++    // write it back into the stored credential (no update API), so persist it in
++    // KV keyed by uid for reuse after a restart or after the stored token dies.
++    const loadToken = async (): Promise<Credential.OAuth> => {
++      if (cur.refresh) return cur
++      const cached = await kvGet(env.kv, `codebuddy.refresh.${uid}`).catch(() => undefined)
++      const cachedAccess = cached?.access
++      const cachedRefresh = cached?.refresh
++      if (typeof cachedAccess === "string" && typeof cachedRefresh === "string" && cachedAccess && cachedRefresh) {
++        return { ...cur, access: cachedAccess, refresh: cachedRefresh }
 +      }
-+      return order
++      return cur
++    }
++    const doRefresh = async (): Promise<Credential.OAuth | undefined> => {
++      const refreshed = await refreshAccessToken(serverUrl, cur.refresh)
++      if (!refreshed?.accessToken) return undefined
++      const updated = credFromToken(refreshed, cur)
++      cur = updated
++      await kvSet(env.kv, `codebuddy.refresh.${uid}`, {
++        access: updated.access,
++        refresh: updated.refresh,
++        at: Date.now(),
++      }).catch(() => {})
++      return updated
 +    }
 +
 +    const prepareBody = (modelId: string) => {
@@ -929,85 +942,60 @@ index 0000000..bddca32
 +        signal: init?.signal,
 +      })
 +
-+    // Replay ONE request across the whole account pool on a given model.
-+    async function runOnModel(modelId: string) {
++    // Replay ONE request on the active account: IOA refresh on 401/403, transient
++    // retry, and a single model fallback for free-tier exhaustion.
++    const runOnModel = async (modelId: string) => {
 +      let lastErr = { status: 0, text: "" }
-+      let allQuota = true
-+      let reset = 0
-+      for (const entry of buildOrder()) {
-+        let cur = entry.value
-+        const label = resolveAccountLabel(cur.access)
-+        let token = cur.refresh || cur.access
-+        let resp: Response | null = null
-+        let attempt = 0
-+        while (attempt < RETRY_MAX_ATTEMPTS) {
-+          attempt++
-+          try {
-+            resp = await doRequest(token, modelId)
-+          } catch (e: any) {
-+            lastErr = { status: 0, text: String(e?.message || e) }
-+            console.error(`[codebuddy] 账号 ${label} 请求异常: ${lastErr.text}`)
-+            if (attempt < RETRY_MAX_ATTEMPTS && isTransientErr(0, lastErr.text)) {
-+              await sleep(RETRY_BACKOFF_MS * attempt)
-+              continue
-+            }
-+            allQuota = false
-+            break
++      const account = await loadToken()
++      let token = account.refresh || account.access
++      let resp: Response | null = null
++      let attempt = 0
++      while (attempt < RETRY_MAX_ATTEMPTS) {
++        attempt++
++        try {
++          resp = await doRequest(token, modelId)
++        } catch (e: any) {
++          lastErr = { status: 0, text: String(e?.message || e) }
++          console.error(`[codebuddy] 账号 ${label} 请求异常: ${lastErr.text}`)
++          if (attempt < RETRY_MAX_ATTEMPTS && isTransientErr(0, lastErr.text)) {
++            await sleep(RETRY_BACKOFF_MS * attempt)
++            continue
 +          }
-+          if ((resp.status === 401 || resp.status === 403) && cur.refresh) {
-+            const refreshed = await refreshAccessToken(serverUrl, cur.refresh)
-+            if (refreshed?.accessToken) {
-+              const updated = credFromToken(refreshed, cur)
-+              try {
-+                await env.runCredential(Credential.Service.update(entry.info.id, { value: updated }))
-+              } catch {}
-+              cur = updated
-+              token = cur.refresh || cur.access
-+              try {
-+                resp = await doRequest(token, modelId)
-+              } catch (e: any) {
-+                resp = new Response("{}", { status: 500 })
-+              }
-+            }
-+          }
-+          if (resp.ok) {
-+            // Persist stickiness: the account that just succeeded becomes active.
-+            try {
-+              await env.runCredential(Credential.Service.activate(entry.info.id))
-+            } catch {}
-+            console.log(`[codebuddy] 使用账号 ${label} 完成请求`)
-+            return { ok: true as const, response: resp, body: prepareBody(modelId) }
-+          }
-+          const errText = await resp.text()
-+          lastErr = { status: resp.status, text: errText }
-+          console.error(`[codebuddy] 账号 ${label} 失败: ${resp.status} - ${errText}`)
-+          const exhausted = ACCOUNT_ROTATION_ENABLED && isQuotaExhausted(resp.status, errText)
-+          if (exhausted) {
-+            console.log(`[codebuddy] 账号 ${label} 额度耗尽，自动尝试下一个账号`)
-+            const rt = parseResetTime(errText)
-+            if (rt && rt > reset) reset = rt
-+            // Persist rotation: make the next account active so the following
-+            // request starts there.
-+            const next = buildOrder()[(buildOrder().findIndex((a) => a.info.id === entry.info.id) + 1) % accounts.length]
-+            if (next) {
-+              try {
-+                await env.runCredential(Credential.Service.activate(next.info.id))
-+              } catch {}
-+            }
-+            break
-+          }
-+          if (isTransientErr(resp.status, errText)) {
-+            if (attempt < RETRY_MAX_ATTEMPTS) {
-+              console.error(`[codebuddy] 账号 ${label} 瞬时错误，重试 (${attempt}/${RETRY_MAX_ATTEMPTS})`)
-+              await sleep(RETRY_BACKOFF_MS * attempt)
-+              continue
-+            }
-+          }
-+          allQuota = false
-+          break
++          return { ok: false as const, response: null, lastErr, exhausted: false, reset: 0, body: prepareBody(modelId) }
 +        }
++        if ((resp.status === 401 || resp.status === 403) && cur.refresh) {
++          const refreshed = await doRefresh()
++          if (refreshed) {
++            token = refreshed.refresh || refreshed.access
++            try {
++              resp = await doRequest(token, modelId)
++            } catch (e: any) {
++              resp = new Response("{}", { status: 500 })
++            }
++          }
++        }
++        if (resp.ok) {
++          console.log(`[codebuddy] 使用账号 ${label} 完成请求`)
++          return { ok: true as const, response: resp, body: prepareBody(modelId) }
++        }
++        const errText = await resp.text()
++        lastErr = { status: resp.status, text: errText }
++        console.error(`[codebuddy] 账号 ${label} 失败: ${resp.status} - ${errText}`)
++        const exhausted = isQuotaExhausted(resp.status, errText)
++        if (exhausted) {
++          const rt = parseResetTime(errText)
++          return { ok: false as const, response: null, lastErr, exhausted: true, reset: rt, body: prepareBody(modelId) }
++        }
++        if (isTransientErr(resp.status, errText)) {
++          if (attempt < RETRY_MAX_ATTEMPTS) {
++            console.error(`[codebuddy] 账号 ${label} 瞬时错误，重试 (${attempt}/${RETRY_MAX_ATTEMPTS})`)
++            await sleep(RETRY_BACKOFF_MS * attempt)
++            continue
++          }
++        }
++        return { ok: false as const, response: null, lastErr, exhausted: false, reset: 0, body: prepareBody(modelId) }
 +      }
-+      return { ok: false as const, response: null, lastErr, allQuota, reset, body: prepareBody(modelId) }
++      return { ok: false as const, response: null, lastErr, exhausted: false, reset: 0, body: prepareBody(modelId) }
 +    }
 +
 +    // Decide the starting model; while inside a recorded free-exhaustion reset
@@ -1027,10 +1015,10 @@ index 0000000..bddca32
 +    }
 +
 +    let result = await runOnModel(startModel)
-+    if (!result.ok && paidFallback && result.allQuota && startModel !== paidFallback) {
++    if (!result.ok && paidFallback && result.exhausted && startModel !== paidFallback) {
 +      freeExhaustedUntil = result.reset || Date.now() + FALLBACK_COOLDOWN_MS
 +      console.log(
-+        `[codebuddy] 免费模型 ${resolvedModel} 所有账号额度耗尽，切换计费模型 ${paidFallback}（重置 ${new Date(freeExhaustedUntil).toLocaleString()}）`,
++        `[codebuddy] 免费模型 ${resolvedModel} 额度耗尽，切换计费模型 ${paidFallback}（重置 ${new Date(freeExhaustedUntil).toLocaleString()}）`,
 +      )
 +      result = await runOnModel(paidFallback)
 +    }
@@ -1043,8 +1031,8 @@ index 0000000..bddca32
 +      }
 +    }
 +
-+    console.error("[codebuddy] 所有账号均未能完成请求")
-+    return new Response(result.lastErr.text || "所有账号均请求失败", {
++    console.error("[codebuddy] 请求失败")
++    return new Response(result.lastErr.text || "请求失败", {
 +      status: result.lastErr.status || 502,
 +      headers: { "Content-Type": "application/json" },
 +    })
