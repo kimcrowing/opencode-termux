@@ -1,0 +1,1090 @@
+diff --git a/packages/core/src/plugin/provider.ts b/packages/core/src/plugin/provider.ts
+index 18ef4e9..2542d70 100644
+--- a/packages/core/src/plugin/provider.ts
++++ b/packages/core/src/plugin/provider.ts
+@@ -3,6 +3,7 @@ import { AmazonBedrockPlugin } from "./provider/amazon-bedrock.js"
+ import { AnthropicPlugin } from "./provider/anthropic.js"
+ import { AzurePlugin } from "./provider/azure.js"
+ import { CerebrasPlugin } from "./provider/cerebras.js"
++import { CodeBuddyPlugin } from "./provider/codebuddy.js"
+ import { CloudflareAIGatewayPlugin } from "./provider/cloudflare-ai-gateway.js"
+ import { CloudflareWorkersAIPlugin } from "./provider/cloudflare-workers-ai.js"
+ import { CoherePlugin } from "./provider/cohere.js"
+@@ -38,6 +39,7 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
+   AnthropicPlugin,
+   AzurePlugin,
+   CerebrasPlugin,
++  CodeBuddyPlugin,
+   CloudflareAIGatewayPlugin,
+   CloudflareWorkersAIPlugin,
+   CoherePlugin,
+diff --git a/packages/core/src/plugin/provider/codebuddy.ts b/packages/core/src/plugin/provider/codebuddy.ts
+new file mode 100644
+index 0000000..90f96e5
+--- /dev/null
++++ b/packages/core/src/plugin/provider/codebuddy.ts
+@@ -0,0 +1,1063 @@
++// CodeBuddy (Tencent) provider plugin for opencode v2.
++//
++// Ported from the classic v1 `codebuddy-auth` plugin (Kim's PC config) onto the
++// v2 internal-plugin surface:
++//   - Credentials are stored with the native v2 Credential service. Every row of
++//     integration "codebuddy" is one account; the ACTIVE row (list()[0]) is the
++//     primary. Rotation calls Credential.Service.activate, publish Event.Switched.
++//   - The AI SDK route bypasses session.hook("http.request"), so the only safe
++//     interception point is evt.options.fetch in the "sdk" hook. The default
++//     OpenAICompatiblePlugin builds createOpenAICompatible(evt.options), so we
++//     only need to swap in our gateway-compatible fetch.
++//   - The IOA browser OAuth flow is exposed as an integration OAuth method, so
++//     opencode manages the attempt/settle lifecycle and stores the credential.
++
++import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
++import { Effect, Semaphore, Stream } from "effect"
++import { Bus } from "../../bus.js"
++import { Catalog } from "../../catalog.js"
++import { Credential } from "../../credential.js"
++import { Integration } from "../../integration.js"
++import { KV } from "../../kv.js"
++import { Model } from "../../model.js"
++import { define } from "@opencode-ai/plugin/effect/plugin"
++import { Provider } from "../../provider.js"
++import type { PluginInternal } from "../internal.js"
++
++const providerID = Provider.ID.make("codebuddy")
++const integrationID = Integration.ID.make("codebuddy")
++const methodID = Integration.MethodID.make("ioa")
++
++// ---- Configuration (mirrors the v1 plugin CONFIG block) ----
++const CONFIG = {
++  serverUrl: "https://copilot.tencent.com",
++  chatCompletionsPath: "/v2/chat/completions",
++  platform: process.env.CODEBUDDY_PLATFORM || "VSCode",
++  appVersion: process.env.CODEBUDDY_APP_VERSION || "4.9.29177644",
++  ideName: process.env.CODEBUDDY_IDE_NAME || "VSCode",
++  ideType: process.env.CODEBUDDY_IDE_TYPE || "VSCode",
++  ideVersion: process.env.CODEBUDDY_IDE_VERSION || "1.119.0",
++  domain: process.env.CODEBUDDY_DOMAIN || "www.codebuddy.cn",
++  product: process.env.CODEBUDDY_PRODUCT || "SaaS",
++  agentIntent: process.env.CODEBUDDY_AGENT_INTENT || "craft",
++  envId: process.env.CODEBUDDY_ENV_ID || "production",
++  tenantId: process.env.CODEBUDDY_TENANT_ID || "",
++  enterpriseId: process.env.CODEBUDDY_ENTERPRISE_ID || "",
++  userId: process.env.CODEBUDDY_USER_ID || "",
++  defaultModel: process.env.CODEBUDDY_DEFAULT_MODEL || "",
++  reasoningEffort: process.env.CODEBUDDY_REASONING_EFFORT || "high",
++  checkinBase: process.env.CODEBUDDY_CHECKIN_BASE || "https://www.codebuddy.cn",
++  checkinEnabled: (process.env.CODEBUDDY_CHECKIN ?? "1") !== "0",
++  quiet: process.env.CODEBUDDY_QUIET !== "0",
++}
++
++const ACCOUNT_ROTATION_ENABLED = (process.env.CODEBUDDY_ACCOUNT_ROTATION ?? "1") !== "0"
++const QUOTA_HINTS = (process.env.CODEBUDDY_QUOTA_KEYWORDS || "额度,quota,限额,用量,exhausted,limit reached,次数,insufficient,rate limit")
++  .split(",")
++  .map((s) => s.trim().toLowerCase())
++  .filter(Boolean)
++const QUOTA_CODES = (process.env.CODEBUDDY_QUOTA_CODES || "14018")
++  .split(",")
++  .map((s) => s.trim())
++  .filter(Boolean)
++const FREE_FALLBACK: Readonly<Record<string, string>> = { hy3: "hy3-x", auto: "hy3-x" }
++const FALLBACK_COOLDOWN_MS = 30 * 60 * 1000
++const RETRY_MAX_ATTEMPTS = 3
++const RETRY_BACKOFF_MS = 800
++const DISCOVERY_TIMEOUT_MS = 5000
++const AO_LOGIN_TTL_MS = 10 * 60 * 1000
++
++function isFreeModel(modelId: string) {
++  return modelId in FREE_FALLBACK
++}
++
++const CHAT_BASE_DEFAULT = `${CONFIG.serverUrl}${CONFIG.chatCompletionsPath}`
++
++// Resolve the model the chat gateway should actually use. opencode may prefix the
++// request model with the provider id ("codebuddy/deepseek-v4-pro"); the gateway
++// only knows the bare id, so strip any "provider/" prefix.
++function resolveModel(inputModel: string | undefined) {
++  if (CONFIG.defaultModel) return CONFIG.defaultModel
++  let m = inputModel || ""
++  const slash = m.indexOf("/")
++  if (slash !== -1) m = m.slice(slash + 1)
++  return m
++}
++
++function isQuotaExhausted(status: number, text: string) {
++  if (status === 429) return true
++  if (!text) return false
++  const lower = text.toLowerCase()
++  if (QUOTA_HINTS.some((h) => h && lower.includes(h))) return true
++  try {
++    const parsed = JSON.parse(text)
++    const candidates = [
++      parsed?.error?.data?.code,
++      parsed?.error?.code,
++      parsed?.data?.code,
++      parsed?.code,
++    ]
++    if (candidates.some((c) => QUOTA_CODES.includes(String(c)))) return true
++  } catch {}
++  return false
++}
++
++function isTransientErr(status: number, text: string) {
++  if (status === 0) return true
++  if (status >= 500) return true
++  if (status === 400 && /11133/.test(text || "")) return true
++  return false
++}
++
++// Parse the reset timestamp out of a 6004 frequency-limit message.
++function parseResetTime(text: string) {
++  const m = String(text || "").match(/(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:\s*(?:UTC|GMT)?\+?(\d+))?/i)
++  if (!m) return 0
++  const tz = m[2] ? `+${m[2].padStart(2, "0")}:00` : "+08:00"
++  const ts = Date.parse(m[1].replace(" ", "T") + tz)
++  return isNaN(ts) ? 0 : ts
++}
++
++// ---- JWT helpers for tenant/enterprise/user/uid resolution ----
++function decodeJwtPayload(token: string) {
++  try {
++    const parts = token.split(".")
++    if (parts.length < 2) return null
++    const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/")
++    const pad = "=".repeat((4 - (payload.length % 4)) % 4)
++    return JSON.parse(Buffer.from(payload + pad, "base64").toString("utf8")) as Record<string, any>
++  } catch {
++    return null
++  }
++}
++
++function resolveTenantId(accessToken: string) {
++  if (CONFIG.tenantId) return CONFIG.tenantId
++  const p = decodeJwtPayload(accessToken)
++  if (!p) return ""
++  const iss = String(p.iss || "")
++  const m = iss.match(/realms\/sso-([^/]+)$/)
++  return p.tenant_id || p.tenantId || (m?.[1] || "")
++}
++
++function resolveEnterpriseId(accessToken: string) {
++  if (CONFIG.enterpriseId) return CONFIG.enterpriseId
++  const p = decodeJwtPayload(accessToken)
++  if (!p) return ""
++  const roles = p.realm_access?.roles || p.resource_access?.account?.roles
++  if (roles) {
++    for (const r of roles) {
++      const m = String(r).match(/group-admin:([A-Za-z0-9-]+)/)
++      if (m?.[1]) return m[1]
++    }
++  }
++  return p.enterprise_id || p.enterpriseId || p.ent_id || p.entId || ""
++}
++
++function resolveUserId(accessToken: string) {
++  if (CONFIG.userId) return CONFIG.userId
++  const p = decodeJwtPayload(accessToken)
++  return p?.user_id || p?.userId || p?.uid || p?.sub || ""
++}
++
++function resolveAccountLabel(accessToken: string) {
++  const p = decodeJwtPayload(accessToken)
++  const phone = p?.preferred_username
++  if (phone) return String(phone)
++  const nick = p?.nickname || p?.name
++  if (nick) return String(nick)
++  return resolveUserId(accessToken) || "未知账号"
++}
++
++// ---- IOA browser OAuth ----
++async function requestAuthState(serverUrl: string) {
++  const params = new URLSearchParams({ platform: CONFIG.platform, ioa: "1" })
++  const response = await fetch(`${serverUrl}/v2/plugin/auth/state?${params.toString()}`, {
++    method: "POST",
++    headers: {
++      Accept: "application/json",
++      "Content-Type": "application/json",
++      "X-No-Authorization": "true",
++      "X-No-User-Id": "true",
++      "X-No-Enterprise-Id": "true",
++      "X-No-Department-Info": "true",
++    },
++  })
++  if (!response.ok) throw new Error(`Auth state request failed: ${response.status}`)
++  const data: any = await response.json()
++  if (data.code !== 0 || !data.data?.state) throw new Error(`Invalid auth state response: ${JSON.stringify(data)}`)
++  const loginUrl =
++    data.data.authUrl || `${serverUrl}/login?platform=${CONFIG.platform}&state=${data.data.state}&ioa=1`
++  return { state: data.data.state as string, url: loginUrl as string }
++}
++
++async function pollForToken(serverUrl: string, state: string, expiresAt: number) {
++  const headers = {
++    Accept: "application/json",
++    "X-No-Authorization": "true",
++    "X-No-User-Id": "true",
++    "X-No-Enterprise-Id": "true",
++    "X-No-Department-Info": "true",
++  }
++  while (Date.now() < expiresAt) {
++    await sleep(3000)
++    try {
++      const response = await fetch(`${serverUrl}/v2/plugin/auth/token?state=${state}`, { headers })
++      if (response.ok) {
++        const data: any = await response.json()
++        if (data.code === 0 && data.data?.accessToken) return data.data as TokenData
++      }
++    } catch {}
++  }
++  return null
++}
++
++async function refreshAccessToken(serverUrl: string, refreshToken: string) {
++  try {
++    const response = await fetch(`${serverUrl}/v2/plugin/auth/token/refresh`, {
++      method: "POST",
++      headers: {
++        "Content-Type": "application/json",
++        Accept: "application/json",
++        Authorization: `Bearer ${refreshToken}`,
++      },
++    })
++    if (!response.ok) return null
++    const data: any = await response.json()
++    if (data.code !== 0) return null
++    return (data.data || null) as TokenData | null
++  } catch {
++    return null
++  }
++}
++
++interface TokenData {
++  accessToken: string
++  refreshToken?: string
++  expiresIn?: number
++}
++
++function credFromToken(token: TokenData, current?: Credential.OAuth): Credential.OAuth {
++  const expires = token.expiresIn ? Date.now() + token.expiresIn * 1000 : Date.now() + 24 * 60 * 60 * 1000
++  const access = token.accessToken
++  return {
++    type: "oauth",
++    methodID,
++    access,
++    refresh: token.refreshToken || current?.refresh || "",
++    expires,
++    metadata: { uid: resolveUserId(access) || current?.metadata?.uid || "" },
++  }
++}
++
++// ---- Remote model discovery (ported from v1 fetchRemoteModels) ----
++interface RemoteModel {
++  id: string
++  name?: string
++  model?: string
++  credits?: string
++  descriptionZh?: string
++  maxInputTokens?: number
++  maxOutputTokens?: number
++  supportsToolCall?: boolean
++  supportsImages?: boolean
++  reasoning?: boolean
++  supportsReasoning?: boolean
++}
++
++let reasoningModelIds = new Set<string>()
++
++async function fetchRemoteModels(serverUrl: string, domain: string, accessToken: string): Promise<RemoteModel[]> {
++  const headers: Record<string, string> = {
++    Accept: "application/json, text/plain, */*",
++    "Content-Type": "application/json",
++    "X-Requested-With": "XMLHttpRequest",
++    Authorization: `Bearer ${accessToken}`,
++    "X-Agent-Intent": CONFIG.agentIntent,
++    "X-IDE-Type": CONFIG.ideType,
++    "X-IDE-Name": CONFIG.ideName,
++    "X-IDE-Version": CONFIG.ideVersion,
++    "X-Product-Version": CONFIG.appVersion,
++    "X-Env-ID": CONFIG.envId,
++    "X-Domain": domain,
++    "X-Product": CONFIG.product,
++    "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
++  }
++  const resp = await fetch(`${serverUrl}/v3/config`, { headers })
++  if (!resp.ok) return []
++  const body: any = await resp.json()
++  if (body.code !== 0 || !body.data) return []
++  const allModels: RemoteModel[] = body.data.models || []
++  reasoningModelIds = new Set<string>()
++  for (const m of allModels) {
++    if (m.reasoning || m.supportsReasoning) reasoningModelIds.add(String(m.id))
++  }
++  const modelMap = new Map<string, RemoteModel>(allModels.map((m) => [String(m.id), m]))
++  const craftAgent = (body.data.agents || []).find((a: { name?: string }) => a.name === CONFIG.agentIntent)
++  const craftIds = craftAgent?.models || []
++  if (craftIds.length === 0) return [defaultRemoteModel()]
++  return craftIds
++    .map((id: unknown) => modelMap.get(String(id)))
++    .filter((m: RemoteModel | undefined): m is RemoteModel => !!m?.supportsToolCall)
++}
++
++function defaultRemoteModel(): RemoteModel {
++  return { id: "auto", name: "Auto", maxInputTokens: 168000, maxOutputTokens: 32000, supportsToolCall: true }
++}
++
++function formatCredits(m: RemoteModel) {
++  const cr = m?.credits
++  if (cr === undefined || cr === null || cr === "x0.00" || cr === "0.00") return { tag: "免费", free: true }
++  return { tag: `${String(cr).replace(/^x/i, "")} Credits/次`, free: false }
++}
++
++function remoteToInfo(m: RemoteModel): Model.Info {
++  const price = formatCredits(m)
++  const baseName = m.name || m.id || m.model || "unknown"
++  const info = Model.Info.default(providerID, Model.ID.make(String(m.id)))
++  return {
++    ...info,
++    name: price.free ? `${baseName} · 免费` : `${baseName} · ${price.tag}`,
++    capabilities: {
++      tools: m.supportsToolCall !== false,
++      input: ["text", "image"],
++      output: ["text"],
++    },
++    limit: {
++      context: Math.max(m.maxInputTokens ?? 168000, 1),
++      output: Math.max(m.maxOutputTokens ?? 32000, 1),
++    },
++  }
++}
++
++function defaultModelInfo(): Model.Info {
++  return remoteToInfo(defaultRemoteModel())
++}
++
++// ---- SSE sanitization (ported from v1 streamCoalescedReasoning) ----
++const encoder = new TextEncoder()
++
++function streamSanitized(response: Response): Response {
++  const upstream = response.body
++  if (!upstream) return response
++  const decoder = new TextDecoder()
++  const reader = upstream.getReader()
++  let buf = ""
++  let doneSeen = false
++
++  const cleanDelta = (delta: Record<string, unknown>) => {
++    if (!delta || typeof delta !== "object") return delta
++    const out: Record<string, unknown> = {}
++    for (const [k, v] of Object.entries(delta)) {
++      if (v === null || v === undefined) continue
++      if ((k === "content" || k === "reasoning_content") && v === "") continue
++      if ((k === "refusal" || k === "extra_fields") && (v === "" || v === null)) continue
++      if (k === "tool_calls" && Array.isArray(v) && v.length === 0) continue
++      out[k] = v
++    }
++    return out
++  }
++
++  const stream = new ReadableStream<Uint8Array>({
++    async pull(controller) {
++      const handleLine = (line: string) => {
++        if (!line.startsWith("data:")) return
++        const payload = line.slice(5).trim()
++        if (payload === "") return
++        if (payload === "[DONE]") {
++          doneSeen = true
++          controller.enqueue(encoder.encode("data: [DONE]\n\n"))
++          return
++        }
++        let obj: any
++        try {
++          obj = JSON.parse(payload)
++        } catch {
++          controller.enqueue(encoder.encode(`${line}\n\n`))
++          return
++        }
++        const choice = obj?.choices?.[0]
++        if (choice) {
++          if (choice.finish_reason === "") choice.finish_reason = null
++          if (choice.delta) choice.delta = cleanDelta(choice.delta)
++        }
++        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
++      }
++      const { done, value } = await reader.read()
++      if (done) {
++        if (buf.trim() !== "")
++          for (const l of buf.split("\n"))
++            if (l.trim() !== "") handleLine(l)
++        buf = ""
++        if (!doneSeen) controller.enqueue(encoder.encode("data: [DONE]\n\n"))
++        controller.close()
++        return
++      }
++      buf += decoder.decode(value, { stream: true })
++      let idx
++      while ((idx = buf.indexOf("\n\n")) !== -1) {
++        const rawEvent = buf.slice(0, idx)
++        buf = buf.slice(idx + 2)
++        for (const line of rawEvent.split("\n")) {
++          if (line.trim() === "") continue
++          handleLine(line)
++        }
++      }
++    },
++    async cancel() {
++      try {
++        await reader.cancel()
++      } catch {}
++    },
++  })
++  return new Response(stream, { status: response.status, headers: response.headers })
++}
++
++// ---- Chat request body sanitization (ported from v1) ----
++const ALLOWED_TOP_KEYS = new Set([
++  "model", "messages", "stream", "max_tokens", "temperature",
++  "top_p", "top_k", "tools", "tool_choice", "stop", "n",
++  "presence_penalty", "frequency_penalty", "logit_bias",
++  "user", "response_format", "seed", "min_p",
++  "repetition_penalty", "stream_options",
++])
++const ALLOWED_MSG_KEYS = new Set([
++  "role", "content", "name", "tool_calls", "tool_call_id",
++  "function_call", "refusal",
++])
++const ALLOWED_PART_TYPES = new Set(["text", "image_url", "input_audio", "file"])
++
++function sanitizeRequestBody(req: any) {
++  const out: Record<string, unknown> = {}
++  for (const k of Object.keys(req || {})) {
++    if (k === "baseURL" || k === "promptCacheKey") continue
++    if (ALLOWED_TOP_KEYS.has(k)) out[k] = req[k]
++  }
++  const msgs: any[] = []
++  const seenToolCallIds = new Set<string>()
++  for (const raw of req.messages || []) {
++    if (!raw || typeof raw !== "object") continue
++    const m: Record<string, unknown> = {}
++    for (const k of Object.keys(raw)) {
++      if (k === "reasoning" || k === "reasoning_content") continue
++      if (ALLOWED_MSG_KEYS.has(k)) m[k] = (raw as Record<string, unknown>)[k]
++    }
++    const role = m.role
++    if (typeof m.content === "string") {
++      // keep as-is
++    } else if (Array.isArray(m.content)) {
++      m.content = m.content
++        .filter((p: any) => p && p.type && ALLOWED_PART_TYPES.has(p.type))
++        .map((p: any) => (p.type === "text" ? { type: "text", text: p.text ?? "" } : p))
++      if (m.content.length === 1 && m.content[0].type === "text") m.content = m.content[0].text
++    } else if (m.content == null) {
++      m.content = ""
++    } else {
++      m.content = String(m.content)
++    }
++    if (role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
++      if (typeof m.content !== "string") m.content = m.content == null ? "" : String(m.content)
++    }
++    if (Array.isArray(m.tool_calls)) {
++      for (const tc of m.tool_calls) {
++        const f = tc.function || {}
++        let a = f.arguments
++        if (typeof a !== "string") {
++          try {
++            a = a == null ? "{}" : JSON.stringify(a)
++          } catch {
++            a = "{}"
++          }
++        } else {
++          try {
++            JSON.parse(a)
++          } catch {
++            a = "{}"
++          }
++        }
++        tc.function = Object.assign({}, f, { arguments: a })
++        if (tc.id) seenToolCallIds.add(tc.id)
++      }
++    }
++    msgs.push(m)
++  }
++  out.messages = msgs.filter((m) => m.role !== "tool" || seenToolCallIds.has(m.tool_call_id))
++  if (typeof out.tool_choice === "string" && !["auto", "none", "required"].includes(out.tool_choice)) {
++    out.tool_choice = { type: "function", function: { name: out.tool_choice } }
++  }
++  return out
++}
++
++// Map opencode's reasoning-effort vocabulary to what the codebuddy gateway accepts.
++function mapEffort(eff: unknown) {
++  if (eff == null) return null
++  const e = String(eff).toLowerCase()
++  if (e === "off" || e === "none") return null
++  if (e === "auto" || e === "default") return "high"
++  if (e === "max") return "xhigh"
++  if (["minimal", "low", "medium", "high", "xhigh"].includes(e)) return e
++  return "high"
++}
++
++function generateTraceId() {
++  const bytes = new Uint8Array(16)
++  globalThis.crypto.getRandomValues(bytes)
++  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
++}
++
++function buildAuthHeaders(accessToken: string, modelId: string, domain: string) {
++  const tenantId = resolveTenantId(accessToken)
++  const enterpriseId = resolveEnterpriseId(accessToken)
++  const userId = resolveUserId(accessToken)
++  const conversationId = generateTraceId()
++  const messageId = generateTraceId()
++  const traceId = generateTraceId()
++  const spanId = generateTraceId().slice(0, 16)
++  const parentSpanId = generateTraceId().slice(0, 16)
++  const headers: Record<string, string> = {
++    Accept: "application/json, text/plain, */*",
++    "Content-Type": "application/json",
++    "X-Requested-With": "XMLHttpRequest",
++    Authorization: `Bearer ${accessToken}`,
++    "X-Request-ID": messageId,
++    "X-Conversation-ID": conversationId,
++    "X-Conversation-Request-ID": messageId,
++    "X-Conversation-Message-ID": messageId,
++    "X-Agent-Intent": CONFIG.agentIntent,
++    "X-IDE-Type": CONFIG.ideType,
++    "X-IDE-Name": CONFIG.ideName,
++    "X-IDE-Version": CONFIG.ideVersion,
++    "X-Product-Version": CONFIG.appVersion,
++    "X-Request-Trace-Id": traceId,
++    "X-Env-ID": CONFIG.envId,
++    "X-Domain": domain,
++    "X-Product": CONFIG.product,
++    "User-Agent": `${CONFIG.ideName}/${CONFIG.ideVersion} CodeBuddy/${CONFIG.appVersion}`,
++    b3: `${traceId}-${spanId}-1-${parentSpanId}`,
++    "X-B3-TraceId": traceId,
++    "X-B3-ParentSpanId": parentSpanId,
++    "X-B3-SpanId": spanId,
++    "X-B3-Sampled": "1",
++  }
++  if (tenantId) headers["X-Tenant-Id"] = tenantId
++  if (enterpriseId) headers["X-Enterprise-Id"] = enterpriseId
++  if (userId) headers["X-User-Id"] = userId
++  if (modelId) headers["X-Model-ID"] = modelId
++  return headers
++}
++
++function sleep(ms: number) {
++  return new Promise((resolve) => setTimeout(resolve, ms))
++}
++
++// ---- Daily check-in (每日自动签到), state stored in KV ----
++const CHECKIN_PATH_STATUS = "/v2/billing/meter/checkin-status"
++const CHECKIN_PATH_ACTIVITY = "/v2/billing/meter/checkin-activity-status"
++const CHECKIN_PATH_CLAIM = "/v2/billing/meter/daily-checkin"
++
++function localDateString(d = new Date()) {
++  const y = d.getFullYear()
++  const m = String(d.getMonth() + 1).padStart(2, "0")
++  const day = String(d.getDate()).padStart(2, "0")
++  return `${y}-${m}-${day}`
++}
++
++function isAlreadyCheckedIn(payload: any) {
++  if (!payload || typeof payload !== "object") return false
++  const code = payload.code
++  const msg = String(payload.message || payload.msg || "")
++  if (code === 10001 || msg.includes("已签到") || msg.includes("已经签到")) return true
++  const data = payload.data
++  if (data && typeof data === "object" && (data.today_checked_in || data.checked_in)) return true
++  return Boolean(payload.today_checked_in || payload.checked_in)
++}
++
++function buildCheckinHeaders(accessToken: string, domain: string) {
++  const headers: Record<string, string> = {
++    Authorization: `Bearer ${accessToken}`,
++    Accept: "application/json",
++    "Content-Type": "application/json",
++    "X-Domain": domain || "www.codebuddy.cn",
++    "User-Agent": "opencode-codebuddy-plugin",
++  }
++  const uid = resolveUserId(accessToken)
++  if (uid) headers["X-User-Id"] = uid
++  const ent = resolveEnterpriseId(accessToken)
++  if (ent) {
++    headers["X-Enterprise-Id"] = ent
++    headers["X-Tenant-Id"] = ent
++  }
++  return headers
++}
++
++async function postCheckin(base: string, pathname: string, accessToken: string, domain: string) {
++  const resp = await fetch(`${base}${pathname}`, {
++    method: "POST",
++    headers: buildCheckinHeaders(accessToken, domain),
++    body: "{}",
++  })
++  let payload: any = null
++  try {
++    payload = await resp.json()
++  } catch {
++    payload = null
++  }
++  return { status: resp.status, payload }
++}
++
++async function attemptCheckin(
++  kv: KV.Interface,
++  base: string,
++  domain: string,
++  accessToken: string,
++  uidOverride: string | undefined,
++) {
++  const uid = uidOverride || resolveUserId(accessToken)
++  const isCredited = (data: any) =>
++    !!data &&
++    (data.today_checked_in === true ||
++      (typeof data.total_credits === "number" && data.total_credits > 0) ||
++      (data.today_credit && data.today_credit > 0))
++  const logCredits = (data: any) => {
++    if (!data) return ""
++    return ` (今日+${data.today_credit ?? 0} 累计${data.total_credits ?? 0})`
++  }
++  await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString() })
++  try {
++    let activity: any = null
++    try {
++      const act = await postCheckin(base, CHECKIN_PATH_ACTIVITY, accessToken, domain)
++      if (act.status >= 200 && act.status < 300 && act.payload?.data) activity = act.payload
++    } catch {}
++
++    if (activity && isCredited(activity.data)) {
++      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 今日已签到${logCredits(activity.data)}`)
++      return
++    }
++
++    const claim = await postCheckin(base, CHECKIN_PATH_CLAIM, accessToken, domain)
++    if (claim.status === 401 || claim.status === 403) {
++      await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `claim ${claim.status}` })
++      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] skipped: token rejected (${claim.status})`)
++      return
++    }
++    let after: any = null
++    try {
++      const act2 = await postCheckin(base, CHECKIN_PATH_ACTIVITY, accessToken, domain)
++      if (act2.status >= 200 && act2.status < 300 && act2.payload?.data) after = act2.payload.data
++    } catch {}
++
++    if (after && isCredited(after)) {
++      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 签到成功${logCredits(after)}`)
++      return
++    }
++    if (isAlreadyCheckedIn(claim.payload)) {
++      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      if (!CONFIG.quiet) console.log("[codebuddy][checkin] 今日已签到")
++      return
++    }
++
++    if (!activity) {
++      const st = await postCheckin(base, CHECKIN_PATH_STATUS, accessToken, domain)
++      if (st.status === 401 || st.status === 403) {
++        await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: `status ${st.status}` })
++        if (!CONFIG.quiet) console.log(`[codebuddy][checkin] skipped: token rejected (${st.status})`)
++        return
++      }
++      if (isAlreadyCheckedIn(st.payload)) {
++        await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++        if (!CONFIG.quiet) console.log("[codebuddy][checkin] 今日已签到")
++        return
++      }
++    }
++
++    if (claim.payload && claim.payload.code === 0) {
++      const credit = claim.payload.data?.credit ?? claim.payload.data?.today_credit ?? claim.payload.data?.points
++      await kv.set(`codebuddy.checkin.${uid}`, { lastSuccess: localDateString() })
++      if (!CONFIG.quiet)
++        console.log(`[codebuddy][checkin] 签到成功${credit != null ? ` credit=${credit}` : ""}`)
++      return
++    }
++    const errMsg = claim.payload?.msg || claim.payload?.message || `http ${claim.status}`
++    await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(errMsg) })
++    if (!CONFIG.quiet) console.log(`[codebuddy][checkin] 签到失败: ${errMsg}`)
++  } catch (e: any) {
++    await kv.set(`codebuddy.checkin.${uid}`, { lastAttempt: localDateString(), lastError: String(e?.message || e) })
++    if (!CONFIG.quiet) console.log(`[codebuddy][checkin] error: ${e?.message || e}`)
++  }
++}
++
++interface CheckinState {
++  readonly lastSuccess?: string
++  readonly lastAttempt?: string
++  readonly lastError?: string
++}
++
++async function checkinState(kv: KV.Interface, uid: string): Promise<CheckinState> {
++  const value = await kv.get(`codebuddy.checkin.${uid}`)
++  return value && typeof value === "object" ? (value as CheckinState) : {}
++}
++
++function maybeDailyCheckin(kv: KV.Interface, credentials: readonly Credential.Info[]) {
++  return Effect.gen(function* () {
++    if (!CONFIG.checkinEnabled) return
++    const today = localDateString()
++    for (const credential of credentials) {
++      if (credential.value.type !== "oauth" || !credential.value.access) continue
++      const uid = String(credential.value.metadata?.uid || resolveUserId(credential.value.access) || "_anon")
++      const state = yield* checkinStateEffect(kv, uid)
++      if (state.lastSuccess === today || state.lastAttempt === today) continue
++      yield* Effect.tryPromise({ try: () => attemptCheckin(kv, CONFIG.checkinBase, domain, credential.value.access, uid) })
++    }
++  })
++}
++
++function checkinStateEffect(kv: KV.Interface, uid: string) {
++  return Effect.tryPromise({ try: () => checkinState(kv, uid) })
++}
++
++// ---- Plugin ----
++export const CodeBuddyPlugin = define({
++  id: "opencode.provider.codebuddy",
++  effect: Effect.fn(function* (ctx) {
++    const catalog = yield* Catalog.Service
++    const bus = yield* Bus.Service
++    const kv = yield* KV.Service
++    const semaphore = Semaphore.makeUnsafe(1)
++
++    // Capture the active services so the plain-async fetch closure (called by the
++    // AI SDK outside Effect) can still query/rotate/update the credential pool.
++    const context = yield* Effect.context<Credential.Service>()
++    const runCredential = Effect.runPromiseWith(context)
++
++    // Resolved server/domain, updated from configured model baseURLs.
++    let resolvedServerUrl = CONFIG.serverUrl
++    let resolvedDomain = CONFIG.domain
++
++    // Current seed models; refreshed by remote discovery once a credential exists.
++    const loaded: { models?: Map<Model.ID, Model.Info> } = {}
++
++    const load = Effect.fn("CodeBuddyPlugin.load")(function* () {
++      const pool = yield* Credential.Service.list(integrationID)
++      const active = pool[0]
++      if (active?.value.type !== "oauth" || !active.value.access) {
++        loaded.models = undefined
++        return
++      }
++      const discovered = yield* Effect.tryPromise({
++        try: () =>
++          Promise.race([
++            fetchRemoteModels(resolvedServerUrl, resolvedDomain, active.value.access),
++            new Promise<RemoteModel[]>((resolve) => setTimeout(() => resolve([]), DISCOVERY_TIMEOUT_MS)),
++          ]),
++        catch: (cause) => cause,
++      }).pipe(
++        Effect.catch(() =>
++          Effect.logDebug("failed to sync CodeBuddy models").pipe(Effect.as(undefined)),
++        ),
++      )
++      if (discovered && discovered.length > 0) {
++        loaded.models = new Map(discovered.map((m) => [Model.ID.make(String(m.id)), remoteToInfo(m)]))
++      }
++    })
++
++    const refresh = () =>
++      semaphore.withPermit(load().pipe(Effect.andThen(ctx.catalog.reload())))
++    // Startup discovery must not block plugin activation on the network.
++    yield* refresh().pipe(Effect.forkScoped)
++    yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID)).pipe(Effect.forkScoped)
++
++    yield* ctx.integration.transform((editor) => {
++      editor.method.remove(integrationID, { type: "key" })
++      editor.method.update(oauthflow(() => resolvedServerUrl, () => resolvedDomain))
++    })
++
++    yield* ctx.catalog.transform((evt) => {
++      evt.provider.update(providerID, (provider) => {
++        provider.name = "CodeBuddy"
++        provider.package = Provider.aisdk("@ai-sdk/openai-compatible")
++        provider.integrationID = integrationID
++        if (!provider.settings || typeof provider.settings.baseURL !== "string") {
++          provider.settings = Provider.mergeOverlay(provider.settings, { baseURL: `${resolvedServerUrl}/v2` })
++        }
++      })
++      const models = loaded.models ?? new Map<Model.ID, Model.Info>([[Model.ID.make("auto"), defaultModelInfo()]])
++      for (const [, model] of models) {
++        evt.model.update(providerID, model.id, (draft) => {
++          draft.name = model.name
++          draft.capabilities = model.capabilities
++          draft.limit = model.limit
++        })
++      }
++    })
++
++    // Re-run model discovery and daily check-in when the active account changes
++    // (login of a new account, rotation, or removal).
++    yield* bus.subscribe(Credential.Event.Switched).pipe(
++      Stream.filter((event) => event.data.integrationID === integrationID),
++      Stream.runForEach(() =>
++        Effect.gen(function* () {
++          yield* maybeDailyCheckin(kv, yield* Credential.Service.list(integrationID))
++          yield* refresh().pipe(Effect.forkScoped)
++        }),
++      ),
++      Effect.forkScoped({ startImmediately: true }),
++    )
++
++    yield* ctx.aisdk.hook(
++      "sdk",
++      Effect.fn(function* (evt) {
++        if (evt.model.providerID !== providerID) return
++        if (!evt.package.includes("@ai-sdk/openai-compatible")) return
++        // Detect a user-configured baseURL override (e.g. codebuddy.ai) so
++        // auth/checkin/discovery follow the same host.
++        if (typeof evt.options?.baseURL === "string" && evt.options.baseURL) {
++          try {
++            const u = new URL(evt.options.baseURL)
++            const hostOnly = `${u.protocol}//${u.host}`
++            resolvedServerUrl = hostOnly
++            if (hostOnly.includes("codebuddy.ai")) resolvedDomain = "www.codebuddy.ai"
++          } catch {}
++        }
++        evt.options.baseURL = `${resolvedServerUrl}/v2`
++        evt.options.fetch = codebuddyFetch({
++          runCredential,
++          getServerUrl: () => resolvedServerUrl,
++          getDomain: () => resolvedDomain,
++        })
++      }),
++    )
++  }),
++} satisfies PluginInternal.InternalPlugin)
++
++interface FetchEnv {
++  runCredential: <A, E>(effect: Effect.Effect<A, E, Credential.Service>) => Promise<A>
++  getServerUrl: () => string
++  getDomain: () => string
++}
++
++// The chat request engine. Reads the live credential pool on every request, so
++// account switches/rotations never need an SDK rebuild: the pool is never cached.
++function codebuddyFetch(env: FetchEnv) {
++  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
++    const urlStr = String(input)
++    if (!urlStr.includes("/chat/completions")) return fetch(input, init)
++
++    const serverUrl = env.getServerUrl()
++    const domain = env.getDomain()
++
++    // Resolve account pool (active first). Every entry keeps its credential id so
++    // we can persist rotations/refreshes through the Credential service.
++    const pool = (await env.runCredential(Credential.Service.list(integrationID))).map((cred) => ({
++      info: cred,
++      value: cred.value.type === "oauth" ? cred.value : undefined,
++    }))
++    const accounts = pool.filter((entry): entry is { info: Credential.Info; value: Credential.OAuth } => entry.value !== undefined)
++    if (accounts.length === 0) throw new Error("缺少 access token，请重新登录")
++
++    const body = init?.body
++    if (!body) {
++      return new Response(JSON.stringify({ error: "Missing request body" }), {
++        status: 400,
++        headers: { "Content-Type": "application/json" },
++      })
++    }
++    const openaiRequest = JSON.parse(typeof body === "string" ? body : await new Response(body).text())
++    const resolvedModel = resolveModel(openaiRequest.model)
++    if (!resolvedModel) throw new Error("未设置模型，请设置 CODEBUDDY_DEFAULT_MODEL 或在 OpenCode 选择模型")
++
++    const startIdx = 0 // list() returns the ACTIVE account first
++    const buildOrder = () => {
++      const order: typeof accounts = []
++      for (let k = 0; k < accounts.length; k++) {
++        const idx = (startIdx + k) % accounts.length
++        if (idx >= 0 && !order.includes(accounts[idx])) order.push(accounts[idx])
++      }
++      return order
++    }
++
++    const prepareBody = (modelId: string) => {
++      const b = sanitizeRequestBody(openaiRequest) as Record<string, unknown>
++      b.model = modelId
++      b.stream = openaiRequest.stream ?? true
++      const userEffort = openaiRequest.reasoning_effort ?? openaiRequest.reasoning?.effort ?? CONFIG.reasoningEffort
++      const mappedEffort = mapEffort(userEffort)
++      if (mappedEffort && (reasoningModelIds.has(modelId) || modelId === "auto")) b.reasoning_effort = mappedEffort
++      return b
++    }
++
++    const doRequest = (token: string, modelId: string) =>
++      fetch(`${serverUrl}${CONFIG.chatCompletionsPath}`, {
++        method: "POST",
++        headers: buildAuthHeaders(token, modelId, domain),
++        body: JSON.stringify(prepareBody(modelId)),
++        signal: init?.signal,
++      })
++
++    // Replay ONE request across the whole account pool on a given model.
++    async function runOnModel(modelId: string) {
++      let lastErr = { status: 0, text: "" }
++      let allQuota = true
++      let reset = 0
++      for (const entry of buildOrder()) {
++        let cur = entry.value
++        const label = resolveAccountLabel(cur.access)
++        let token = cur.refresh || cur.access
++        let resp: Response | null = null
++        let attempt = 0
++        while (attempt < RETRY_MAX_ATTEMPTS) {
++          attempt++
++          try {
++            resp = await doRequest(token, modelId)
++          } catch (e: any) {
++            lastErr = { status: 0, text: String(e?.message || e) }
++            console.error(`[codebuddy] 账号 ${label} 请求异常: ${lastErr.text}`)
++            if (attempt < RETRY_MAX_ATTEMPTS && isTransientErr(0, lastErr.text)) {
++              await sleep(RETRY_BACKOFF_MS * attempt)
++              continue
++            }
++            allQuota = false
++            break
++          }
++          if ((resp.status === 401 || resp.status === 403) && cur.refresh) {
++            const refreshed = await refreshAccessToken(serverUrl, cur.refresh)
++            if (refreshed?.accessToken) {
++              const updated = credFromToken(refreshed, cur)
++              try {
++                await env.runCredential(Credential.Service.update(entry.info.id, { value: updated }))
++              } catch {}
++              cur = updated
++              token = cur.refresh || cur.access
++              try {
++                resp = await doRequest(token, modelId)
++              } catch (e: any) {
++                resp = new Response("{}", { status: 500 })
++              }
++            }
++          }
++          if (resp.ok) {
++            // Persist stickiness: the account that just succeeded becomes active.
++            try {
++              await env.runCredential(Credential.Service.activate(entry.info.id))
++            } catch {}
++            console.log(`[codebuddy] 使用账号 ${label} 完成请求`)
++            return { ok: true as const, response: resp, body: prepareBody(modelId) }
++          }
++          const errText = await resp.text()
++          lastErr = { status: resp.status, text: errText }
++          console.error(`[codebuddy] 账号 ${label} 失败: ${resp.status} - ${errText}`)
++          const exhausted = ACCOUNT_ROTATION_ENABLED && isQuotaExhausted(resp.status, errText)
++          if (exhausted) {
++            console.log(`[codebuddy] 账号 ${label} 额度耗尽，自动尝试下一个账号`)
++            const rt = parseResetTime(errText)
++            if (rt && rt > reset) reset = rt
++            // Persist rotation: make the next account active so the following
++            // request starts there.
++            const next = buildOrder()[(buildOrder().findIndex((a) => a.info.id === entry.info.id) + 1) % accounts.length]
++            if (next) {
++              try {
++                await env.runCredential(Credential.Service.activate(next.info.id))
++              } catch {}
++            }
++            break
++          }
++          if (isTransientErr(resp.status, errText)) {
++            if (attempt < RETRY_MAX_ATTEMPTS) {
++              console.error(`[codebuddy] 账号 ${label} 瞬时错误，重试 (${attempt}/${RETRY_MAX_ATTEMPTS})`)
++              await sleep(RETRY_BACKOFF_MS * attempt)
++              continue
++            }
++          }
++          allQuota = false
++          break
++        }
++      }
++      return { ok: false as const, response: null, lastErr, allQuota, reset, body: prepareBody(modelId) }
++    }
++
++    // Decide the starting model; while inside a recorded free-exhaustion reset
++    // window prefer the paid fallback so requests keep flowing.
++    const requestedFree = isFreeModel(resolvedModel)
++    const paidFallback: string | null = requestedFree ? (FREE_FALLBACK[resolvedModel] ?? null) : null
++    let startModel = resolvedModel
++    if (freeExhaustedUntil && Date.now() < freeExhaustedUntil) {
++      if (paidFallback) {
++        startModel = paidFallback
++        console.log(
++          `[codebuddy] 免费模型 ${resolvedModel} 仍在重置窗口(${new Date(freeExhaustedUntil).toLocaleString()})，使用计费模型 ${paidFallback}`,
++        )
++      }
++    } else if (freeExhaustedUntil) {
++      freeExhaustedUntil = 0
++    }
++
++    let result = await runOnModel(startModel)
++    if (!result.ok && paidFallback && result.allQuota && startModel !== paidFallback) {
++      freeExhaustedUntil = result.reset || Date.now() + FALLBACK_COOLDOWN_MS
++      console.log(
++        `[codebuddy] 免费模型 ${resolvedModel} 所有账号额度耗尽，切换计费模型 ${paidFallback}（重置 ${new Date(freeExhaustedUntil).toLocaleString()}）`,
++      )
++      result = await runOnModel(paidFallback)
++    }
++
++    if (result.ok) {
++      try {
++        return streamSanitized(result.response)
++      } catch {
++        return result.response
++      }
++    }
++
++    console.error("[codebuddy] 所有账号均未能完成请求")
++    return new Response(result.lastErr.text || "所有账号均请求失败", {
++      status: result.lastErr.status || 502,
++      headers: { "Content-Type": "application/json" },
++    })
++  }
++}
++
++// Registration of the IOA browser OAuth flow as an integration method. The core
++// runs authorize(), then polls the callback (mode "auto"), then persists the
++// credential via Credential.Service.create — which auto-activates it.
++function oauthflow(getServerUrl: () => string, getDomain: () => string): IntegrationOAuthMethodRegistration {
++  return {
++    integrationID,
++    method: {
++      id: methodID,
++      type: "oauth",
++      label: "IOA 登录 (浏览器)",
++    },
++    authorize: () =>
++      Effect.gen(function* () {
++        const serverUrl = getServerUrl()
++        const authState = yield* Effect.tryPromise({ try: () => requestAuthState(serverUrl) })
++        const expiresAt = Date.now() + AO_LOGIN_TTL_MS
++        return {
++          mode: "auto" as const,
++          url: authState.url,
++          instructions: "请在浏览器中完成 IOA 登录",
++          expiresAt,
++          callback: Effect.tryPromise({
++            try: () => pollForToken(serverUrl, authState.state, expiresAt),
++          }).pipe(
++            Effect.flatMap((tokenData) =>
++              tokenData
++                ? Effect.succeed(credFromToken(tokenData))
++                : Effect.fail(new Error("IOA 登录超时")),
++            ),
++          ),
++        }
++      }),
++    refresh: (credential) =>
++      Effect.tryPromise({ try: () => refreshAccessToken(getServerUrl(), credential.refresh) }).pipe(
++        Effect.flatMap((data) =>
++          data?.accessToken
++            ? Effect.succeed(credFromToken(data, credential))
++            : Effect.fail(new Error("IOA token refresh failed")),
++        ),
++      ),
++    label: (credential) => resolveAccountLabel(credential.access),
++  }
++}
+\ No newline at end of file

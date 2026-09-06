@@ -363,6 +363,25 @@ jobs:
           echo "$SHA" > build/opencode-src/.built-sha
           echo "::notice::upstream HEAD: $SHA"
 
+      - name: Apply codebuddy provider patch
+        # Forwards against pristine upstream; also handles a cached checkout
+        # that already carries the patch applied (restore-keys reuse).
+        run: |
+          set -euo pipefail
+          CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
+          PATCH="$GITHUB_WORKSPACE/patches/opencode/codebuddy-provider.patch"
+          test -f "$PATCH" || { echo "::error::patch missing: $PATCH"; exit 1; }
+          if git -C "$CORE_DIR" apply --check "$PATCH" 2>/dev/null; then
+            git -C "$CORE_DIR" apply "$PATCH"
+            echo "::notice::codebuddy provider patch applied"
+          elif git -C "$CORE_DIR" apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "::notice::codebuddy provider patch already applied"
+          else
+            echo "::error::codebuddy provider patch failed to apply"
+            exit 1
+          fi
+          git -C "$CORE_DIR" diff --stat HEAD -- packages/core/src/plugin
+
       - name: Cache bun install
         id: cache-install
         uses: actions/cache@v5
@@ -495,6 +514,24 @@ jobs:
           SHA="$(git -C build/opencode-src rev-parse HEAD)"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "::notice::upstream HEAD: $SHA"
+
+      - name: Apply codebuddy provider patch
+        # Same forward/reverse logic as the android build job: the patch also
+        # lands in this job so the linux-x64 build type-checks it cheaply
+        # (no Zig/NDK), catching any upstream-API drift before the android bundle.
+        run: |
+          set -euo pipefail
+          CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
+          PATCH="$GITHUB_WORKSPACE/patches/opencode/codebuddy-provider.patch"
+          if git -C "$CORE_DIR" apply --check "$PATCH" 2>/dev/null; then
+            git -C "$CORE_DIR" apply "$PATCH"
+            echo "::notice::codebuddy provider patch applied (verify)"
+          elif git -C "$CORE_DIR" apply --reverse --check "$PATCH" 2>/dev/null; then
+            echo "::notice::codebuddy provider patch already applied (verify)"
+          else
+            echo "::error::codebuddy provider patch failed to apply"
+            exit 1
+          fi
 
       # The install must be tied to the upstream commit, not only to bun.lock:
       # a republished tarball (same version, new export map) keeps the lock hash
