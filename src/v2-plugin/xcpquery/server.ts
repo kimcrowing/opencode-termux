@@ -11,6 +11,7 @@ import * as core from "./core.mjs";
 
 const {
   ensureSession,
+  setCredentials,
   searchPatent,
   searchPatentForeign,
   navigateDetail,
@@ -43,7 +44,7 @@ type ToolDef = {
   description: string;
   input: Record<string, unknown>;
   options: { namespace: string };
-  execute: (args: ToolInput) => Promise<string>;
+  execute: (args: ToolInput) => Promise<string | { output: string }>;
 };
 
 // v2 用裸 JSON Schema 描述入参（v1 的 zod 在 v2 侧不可用）。
@@ -268,6 +269,9 @@ export default {
     const username = cfg.username || process.env.CNIPA_USERNAME;
     const password = cfg.password || process.env.CNIPA_PASSWORD;
 
+    // v2：把配置的凭据显式注入 core，确保 ensureSession/doLogin 使用正确账号。
+    if (username) setCredentials(username, password);
+
     // 与 v1 一致：启动时若配置了凭据就自动登录（含验证码），失败则由工具在使用时重试。
     if (username && password) {
       try {
@@ -282,7 +286,19 @@ export default {
     // by the callback. Sentinel + composed-id capture must happen inside.
     const registration = await ctx.tool.transform((editor) => {
       for (const t of TOOLS) {
-        editor.add(t);
+        // 与 dingtalk 相同的幂等修复：不原地改写 t.execute，避免重复 transform
+        // 时 {content} 逐层 stringify 嵌套膨胀。
+        const base = t.execute;
+        editor.add({
+          ...t,
+          execute: async (...a) => {
+            const r = await base(...a);
+            if (r && typeof r === "object" && !Array.isArray(r) && typeof (r as { content?: unknown }).content === "string") {
+              return r;
+            }
+            return { content: typeof r === "string" ? r : JSON.stringify(r) };
+          },
+        });
       }
       const ids = editor.list().map(({ id }) => id);
       const sentinel = process.env.XCPQUERY_VERIFY_SENTINEL;

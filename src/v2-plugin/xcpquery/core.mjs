@@ -316,6 +316,12 @@ let TOKEN = null;
 let USERNAME = null;
 let PASSWORD = null;
 
+// 插件启动时由 server.ts 注入凭据（v1 由 input.client / env 提供，v2 改为显式注入）。
+function setCredentials(username, password) {
+  if (username) USERNAME = username;
+  if (password) PASSWORD = password;
+}
+
 function saveSession() {
   try {
     const cookies = {};
@@ -537,13 +543,26 @@ async function cpqueryRequest(method, apiPath, params) {
         continue;
       }
       const text = res.body || "";
+      // cpquery 反代会把瑞数 WAF 的 WP-cookie 失效伪装成 nginx 404（路径未预解）。
+      // 视同 412：重解 WAF 后重试，尝试耗尽才抛错；不要在这之前直接放弃。
+      // 另外：连续 412 挑战后反代会升级为「空 body 或 HTML body 的 400」（WAF 封禁特征），
+      // 同样视同 WAF 问题重试；只有带 JSON body 的 400（真实参数错误）才直接抛错。
+      const looksWaf = res.status === 404 || !text || /^<!DOCTYPE|<html/i.test(text.trim());
+      if (looksWaf) {
+        invalidateWafCache();
+        if (attempt < 3) {
+          if (process.env.XCP_DEBUG) console.error(`[xcp] ${res.status} → 视同 WAF 失效重解 (${apiPath})`);
+          await sleep(700);
+          continue;
+        }
+      }
       if (process.env.XCP_DEBUG) console.error("[xcp] client error", res.status, text.slice(0, 200));
       throw new Error(`client error ${res.status}: ${text.slice(0, 200)}`);
     }
     if (res.status === 412 || (typeof res.body === "string" && res.body.includes('cd="'))) {
       invalidateWafCache();
       if (attempt < 3) {
-        await sleep(300);
+        await sleep(700); // 加长退避，避免同一路径连续 412 被 WAF 升级为封禁(400 空 body)
         continue;
       }
       throw new Error("412 anti-bot challenge failed");
@@ -1194,6 +1213,7 @@ function _toText(r) {
 // server.ts; this module keeps only the protocol logic.
 export {
   doLogin,
+  setCredentials,
   ensureSession,
   searchPatent,
   searchPatentForeign,

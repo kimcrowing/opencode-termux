@@ -829,7 +829,10 @@ function toolDef(name, description, properties, required, execute) {
       required: required || [],
       additionalProperties: false,
     },
-    execute,
+    execute: async (...a) => {
+      const r = await execute(...a);
+      return { content: typeof r === "string" ? r : JSON.stringify(r) };
+    },
     options: { namespace: TOOL_NAMESPACE },
   };
 }

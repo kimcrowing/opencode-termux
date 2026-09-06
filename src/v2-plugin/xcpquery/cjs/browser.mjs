@@ -375,6 +375,21 @@ export async function browserRequest(method, urlPath, opts = {}) {
       // re-solve (delete WP, re-navigate, let waf.js write a new one), then retry.
       res = await doFetch(true);
     }
+    // cpquery 反代也会把 WAF 拒绝伪装成 nginx 404（HTML 体、带瑞数窗口 meta）。
+    // 只有 HTML 体 404 才视同 WAF 失效；API 层 JSON 404（真实不存在）不误伤。
+    if (res.status === 404 && (typeof res.body === "string" && /^<!DOCTYPE|<html/i.test(res.body.trim()))) {
+      if (D) console.error("[req] 404 HTML → WAF 伪装，强制重解后重试:", urlPath);
+      res = await doFetch(true);
+    }
+    // 连续 412 挑战后反代会升级为「空 body 或 HTML body 的 400」（WAF 封禁特征，
+    // 真实参数错误的 400 一定是 JSON body）。同样强制重解 WAF 后重试。
+    if (
+      res.status === 400 &&
+      (typeof res.body !== "string" || !res.body.trim() || /^<!DOCTYPE|<html/i.test(res.body.trim()))
+    ) {
+      if (D) console.error("[req] 400 空/HTML body → WAF 封禁特征，强制重解后重试:", urlPath);
+      res = await doFetch(true);
+    }
     // 401 but no valid token sent → session stale.  Refresh WAF+SSO session
     // once and retry.  (The session token lives in index.js scope, so the
     // decision to re-login lives there; here we only refresh WAF/session when
@@ -562,7 +577,32 @@ export function invalidateWafCache() {
 export async function browserLogin(username, password, helpers) {
   const ws = await getResidentWs();
   const D = !!process.env.XCP_DEBUG;
-  const fetchIn = (method, url, body) => browserEval(ws, inpageFetch, method, url, body);
+  // inpage fetch with retries: right after a navigation the page may still be
+  // under the 瑞数 WAF challenge or mid-redirect, which makes the in-page fetch
+  // throw "Failed to fetch".  Retry a few times once the page settles.
+  const fetchIn = async (method, url, body) => {
+    let last = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await browserEval(ws, inpageFetch, method, url, body);
+        if (r && r.error) {
+          last = r;
+          if (/Failed to fetch|NetworkError|ERR_/i.test(r.error)) {
+            if (D) console.error("[login] fetchIn retry", attempt, method, url, "err=", r.error);
+            await sleep(1200 * (attempt + 1));
+            continue;
+          }
+          return r;
+        }
+        return r;
+      } catch (e) {
+        last = { error: (e && e.message) || String(e) };
+        if (D) console.error("[login] fetchIn throw retry", attempt, method, url, "err=", last.error);
+        await sleep(1200 * (attempt + 1));
+      }
+    }
+    return last || { error: "Failed to fetch (4 attempts)" };
+  };
   // Capture the SPA's own /auth/token request so we can replicate its exact shape.
   const spaReqs = [];
   try {
@@ -604,6 +644,21 @@ export async function browserLogin(username, password, helpers) {
     if (!code) {
       // Fresh profile: need to drive the tysf login form in-browser.
       if (!(await hasWafSolved(ws))) await solveOnTab(ws);
+      // solveOnTab navigates the tab to TARGET (cpquery).  All following
+      // fetches target the tysf origin, so first bring the tab back to tysf to
+      // keep them same-origin (an in-page cross-origin fetch would otherwise
+      // fail with "Failed to fetch").
+      const href = await browserEval(ws, () => location.href).catch(() => "") || "";
+      if (!String(href).startsWith(TYF)) {
+        if (D) console.error("[login] 页面不在 tysf 域(href=" + String(href).slice(0, 80) + ")，导航回 tysf 登录页");
+        await cdp(ws, "Page.navigate", { url: TYF + "/am/" }).catch(() => {});
+        // 给页面 + 可能的 tysf WAF 一点时间安顿，再开始 fetch。
+        for (let i = 0; i < 8; i++) {
+          await sleep(1000);
+          const h2 = await browserEval(ws, () => location.href).catch(() => "") || "";
+          if (String(h2).startsWith(TYF)) break;
+        }
+      }
       const lp = await fetchIn("GET", TYF + "/login");
       const tmpl = lp.body && lp.body.data;
       if (!tmpl) throw new Error("tysf /login 未返回模板: " + JSON.stringify(lp).slice(0, 200));

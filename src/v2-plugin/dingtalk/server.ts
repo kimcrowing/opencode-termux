@@ -42,7 +42,7 @@ type ToolDef = {
   description: string;
   input: Record<string, unknown>;
   options: { namespace: string };
-  execute: (args: ToolInput) => Promise<string> | string;
+  execute: (args: ToolInput) => Promise<string> | string | Promise<{ output: string }> | { output: string };
 };
 
 const props = (fields: Record<string, { type: string; description: string }>) => ({
@@ -314,7 +314,20 @@ export default {
     // by the callback. Sentinel + composed-id capture must happen inside.
     const registration = await ctx.tool.transform((editor: any) => {
       for (const t of TOOLS) {
-        editor.add(t);
+        // 注意：不能原地改写 TOOLS 里的 t.execute —— setup/transform 可能多次执行，
+        // 原地改写会让包装一层套一层（{content} 反复 stringify -> 嵌套膨胀）。
+        // 用 {...t} 展开成新对象，wrapper 永远只包原始 execute；并做幂等透传。
+        const base = t.execute;
+        editor.add({
+          ...t,
+          execute: async (...a: any[]) => {
+            const r = await base(...a);
+            if (r && typeof r === "object" && !Array.isArray(r) && typeof (r as { content?: unknown }).content === "string") {
+              return r; // 已是 { content: string } 形状，直接透传
+            }
+            return { content: typeof r === "string" ? r : JSON.stringify(r) };
+          },
+        });
       }
       const ids = editor.list().map(({ id }: { id: string }) => id);
       const sentinel = process.env.DINGTALK_VERIFY_SENTINEL;
