@@ -82,7 +82,7 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 - `PromptInput.Prompt = { text, files?, agents?, skills? }` —— 扁平 `text`，**无 `parts`、无 per-request `system`**。
 
 ### 验证脚本与 sentinel 约定
-- `tests/v2-plugin/verify.sh <linux-binary>` 通用验证（hello-v2 插件）；专项脚本 `verify-uyanip.sh` / `verify-xcpquery.sh` / `verify-dingtalk.sh`，参数都是二进制路径。
+- `tests/v2-plugin/verify.sh <linux-binary>` 全插件验证（codebuddy provider + 三个工具插件 dingtalk/uyanip/xcpquery 全部注册且 active，且 `/api/plugin` 无任何非 active 状态）；专项脚本 `verify-uyanip.sh` / `verify-xcpquery.sh` / `verify-dingtalk.sh`（各自断言 host 合成工具 id），参数都是二进制路径。
 - 端口：uyanip `41844` / xcpquery `41845` / dingtalk `41846`（可用 `V2_<NAME>_PORT` 覆盖）。
 - sentinel env：`UYANIP_VERIFY_SENTINEL` / `XCPQUERY_VERIFY_SENTINEL` / `DINGTALK_VERIFY_SENTINEL`；脚本内 `PASSWORD="${V2_PASSWORD:-opencode-verify-password}"`。
 - 工作流在 ubuntu runner 上 `bun install` 后 build linux-x64 二进制（`--skip-web-ui --skip-install`）再跑。
