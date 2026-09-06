@@ -389,15 +389,20 @@ jobs:
 
       - name: Apply codebuddy provider patch
         # Deterministic apply: cached checkouts (restore-keys reuse) can carry a
-        # previously-applied patch whose untracked codebuddy.ts survives the
-        # checkout --force reset, so always restore a pristine tree first.
+        # previously-applied patch (untracked new files survive the checkout
+        # --force reset), so always restore a pristine tree first. The patch
+        # touches packages/core, packages/schema and docs/, so clean all of
+        # them - only clearing packages/core/src/plugin leaves residues like
+        # docs/gateway-provider.md behind ("already exists" failures). Note
+        # docs/ does not exist at upstream HEAD, so checkout only touches paths
+        # that do, and clean handles the untracked residues.
         run: |
           set -euo pipefail
           CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
           PATCH="$GITHUB_WORKSPACE/patches/opencode/codebuddy-provider.patch"
           test -f "$PATCH" || { echo "::error::patch missing: $PATCH"; exit 1; }
-          git -C "$CORE_DIR" checkout --force HEAD -- packages/core
-          git -C "$CORE_DIR" clean -fd -- packages/core/src/plugin
+          git -C "$CORE_DIR" checkout --force HEAD -- packages/core packages/schema
+          git -C "$CORE_DIR" clean -fd -- packages/core packages/schema docs
           git -C "$CORE_DIR" apply --check "$PATCH"
           git -C "$CORE_DIR" apply "$PATCH"
           echo "::notice::codebuddy provider patch applied"
@@ -560,12 +565,16 @@ jobs:
         # Same deterministic restore-then-apply as the android build job: the
         # patch also lands here so the linux-x64 build type-checks it cheaply
         # (no Zig/NDK), catching any upstream-API drift before the android bundle.
+        # Cached opencode-src checkouts may carry previously-applied untracked
+        # new files, so clean every touched path (core/schema/docs), not just
+        # packages/core/src/plugin. docs/ has no upstream HEAD entry, so only
+        # checkout paths that exist at HEAD.
         run: |
           set -euo pipefail
           CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
           PATCH="$GITHUB_WORKSPACE/patches/opencode/codebuddy-provider.patch"
-          git -C "$CORE_DIR" checkout --force HEAD -- packages/core
-          git -C "$CORE_DIR" clean -fd -- packages/core/src/plugin
+          git -C "$CORE_DIR" checkout --force HEAD -- packages/core packages/schema
+          git -C "$CORE_DIR" clean -fd -- packages/core packages/schema docs
           git -C "$CORE_DIR" apply --check "$PATCH"
           git -C "$CORE_DIR" apply "$PATCH"
           echo "::notice::codebuddy provider patch applied (verify)"
