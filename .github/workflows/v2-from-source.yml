@@ -388,6 +388,21 @@ jobs:
           echo "::notice::codebuddy provider patch applied"
           git -C "$CORE_DIR" diff --stat HEAD -- packages/core/src/plugin
 
+      - name: Apply nvidia prompt-cache-key patch
+        # NVIDIA's OpenAI-compatible gateway rejects `prompt_cache_key` with
+        # HTTP 400; only Nvidia is excluded, and behavior for OpenAI/DeepSeek/
+        # Zai/... is unchanged. Deterministic restore-then-apply like above.
+        run: |
+          set -euo pipefail
+          CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
+          PATCH="$GITHUB_WORKSPACE/patches/opencode/nvidia-prompt-cache-key.patch"
+          test -f "$PATCH" || { echo "::error::patch missing: $PATCH"; exit 1; }
+          git -C "$CORE_DIR" checkout --force HEAD -- packages/ai/src/protocols/openai-chat.ts
+          git -C "$CORE_DIR" apply --check "$PATCH"
+          git -C "$CORE_DIR" apply "$PATCH"
+          echo "::notice::nvidia prompt-cache-key patch applied"
+          git -C "$CORE_DIR" diff --stat HEAD -- packages/ai/src/protocols
+
       - name: Cache bun install
         id: cache-install
         uses: actions/cache@v5
@@ -538,6 +553,18 @@ jobs:
           git -C "$CORE_DIR" apply --check "$PATCH"
           git -C "$CORE_DIR" apply "$PATCH"
           echo "::notice::codebuddy provider patch applied (verify)"
+
+      - name: Apply nvidia prompt-cache-key patch
+        # Same deterministic restore-then-apply as the android build job, so the
+        # linux-x64 type-check builds with the same patched sources.
+        run: |
+          set -euo pipefail
+          CORE_DIR="$GITHUB_WORKSPACE/build/opencode-src"
+          PATCH="$GITHUB_WORKSPACE/patches/opencode/nvidia-prompt-cache-key.patch"
+          git -C "$CORE_DIR" checkout --force HEAD -- packages/ai/src/protocols/openai-chat.ts
+          git -C "$CORE_DIR" apply --check "$PATCH"
+          git -C "$CORE_DIR" apply "$PATCH"
+          echo "::notice::nvidia prompt-cache-key patch applied (verify)"
 
       # The install must be tied to the upstream commit, not only to bun.lock:
       # a republished tarball (same version, new export map) keeps the lock hash
