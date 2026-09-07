@@ -19,6 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as core from "./core.mjs";
+import { listOpencodeCredentials } from "./credential-sync.mjs";
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -249,10 +250,12 @@ const TOOLS: ToolDef[] = [
     name: "manual_token",
     description:
       "手动注入某网站的 access token 到指定账户（用于 OAuth 授权码流程完成登录，或把抓包得到的 token 直接写入本地登录态）。" +
-      "account 缺省时写入账号池首个账户或注入所得的用户名。成功后 token 持久化，后续可跑活动。",
+      "account 缺省时写入账号池首个账户或注入所得的用户名。refreshToken 可选（刷新用），会随 cookies 持久化。" +
+      "成功后 token 持久化，后续可跑活动；站点适配器支持时（如 codebuddy）同时同步进 opencode credential 表。",
     input: props({
       site: S("站点 id，如 gitcode"),
       token: S("access token"),
+      refreshToken: S("refresh token（可选；存入 cookies.refresh_token 供 refresh() 续期使用）"),
       account: S("目标账户标识（user.username），可选；缺省取账号池首个账户，池空则用 token 对应用户名"),
     }),
     options: { namespace: "auth_login" },
@@ -264,7 +267,10 @@ const TOOLS: ToolDef[] = [
         if (!merged.manualToken) {
           return { site: cfg.site, ok: false, message: "该站点适配器未实现 manualToken()" };
         }
-        const r = await merged.manualToken(merged, { token: String(a.token || "") });
+        const r = await merged.manualToken(merged, {
+          token: String(a.token || ""),
+          refreshToken: a.refreshToken ? String(a.refreshToken) : undefined,
+        });
         // 确定账户槽位：优先 a.account → 账号池首个 → provider 解析出的用户名 → default
         const siteId = provider.id || (a.site as string);
         let accountId = a.account ? String(a.account) : "";
@@ -275,12 +281,76 @@ const TOOLS: ToolDef[] = [
         // 写入 core 会话（指定账户槽）
         const s = core.getSession(siteId, accountId);
         s.token = r.token;
+        s.cookies = r.cookies || { access_token: r.token, refresh_token: (r as any).refreshToken || "" };
         s.headers = r.headers || { Authorization: `Bearer ${r.token}` };
         s.user = r.user || null;
         s.savedAt = Date.now();
         s.state = core.SITE_STATE.CONFIRMED;
         core.persistSession(siteId, accountId, s);
-        return { site: cfg.site, account: accountId, ok: true, loggedIn: true, user: s.user };
+        // 方案 A：站点适配器支持时（codebuddy），把注入的 token 同步进 opencode credential 表
+        const syncOut = { synced: false };
+        if (typeof merged.syncCredentialSafe === "function") {
+          try {
+            const res = await merged.syncCredentialSafe({
+              token: r.token,
+              refresh: (r.cookies && r.cookies.refresh_token) || (r as any).refreshToken || "",
+              label: accountId,
+              makeActive: true,
+            });
+            syncOut.synced = true;
+            syncOut.dbs = res && res.dbs;
+          } catch {}
+        }
+        return { site: cfg.site, account: accountId, ok: true, loggedIn: true, user: s.user, syncedCredential: syncOut };
+      }),
+  },
+  {
+    name: "import_accounts",
+    description:
+      "从 opencode credential 表（opencode.db）导入某集成（integration_id）的现有 OAuth 凭据到本插件站点账号池。" +
+      "典型场景：opencode 已登录过 codebuddy 多个账号（credential 表已有 access+refresh）→ 一键把全部账号加入 " +
+      "auth-login 账号池，之后 auth_login_daily / run_activities 缺省遍历全部账户（多账户轮询切换）。",
+    input: props({
+      site: S("站点 id，如 codebuddy"),
+      integration: S("opencode credential 表 integration_id（缺省用站点 id，如 codebuddy）"),
+    }),
+    options: { namespace: "auth_login" },
+    execute: (a) =>
+      toolResult(async () => {
+        const cfg = siteOf(a);
+        const provider = await loadProvider(cfg.site || (a.site as string));
+        const siteId = provider.id || (a.site as string);
+        const integration = String(a.integration || siteId);
+        const creds = await listOpencodeCredentials(integration);
+        if (!creds.length) {
+          return {
+            site: cfg.site,
+            integration,
+            ok: false,
+            message: `credential 表中没有 integration_id="${integration}" 的 OAuth 凭据`,
+          };
+        }
+        const imported = [];
+        for (const c of creds) {
+          const label = c.label || "default";
+          // 用 provider.manualToken 构造会话（解出 user/headers/cookies）
+          const r = await provider.manualToken(provider, { token: c.access, refreshToken: c.refresh });
+          const s = core.getSession(siteId, label);
+          s.token = r.token;
+          s.cookies = r.cookies || { access_token: c.access, refresh_token: c.refresh };
+          s.headers = r.headers || { Authorization: `Bearer ${c.access}` };
+          s.user = r.user || null;
+          s.savedAt = Date.now();
+          s.state = core.SITE_STATE.CONFIRMED;
+          core.persistSession(siteId, label, s);
+          imported.push({
+            account: label,
+            loggedIn: true,
+            expires: c.expires ? new Date(c.expires).toISOString() : null,
+            activeInOpencode: c.active,
+          });
+        }
+        return { site: cfg.site, integration, ok: true, imported };
       }),
   },
   {

@@ -16,11 +16,11 @@
   - `core.mjs`：扫码登录状态机 + 后台轮询 + token 持久化
     （**账号池**：`storage/<site>/accounts/<user>.json`，每账户一文件，参照 uyanip session.json 模式；
     旧版单文件 `storage/<site>.json` 首次访问自动迁移）+ 活动执行器。
-- **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock）。每个适配器实现 `generateQr()/pollStatus()/
+- **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock / **codebuddy**）。每个适配器实现 `generateQr()/pollStatus()/
   headers()/manualToken()` 等（文本二维码也可用 `loginUrl()`）；接入新网站 = 新建一个 provider 文件 +
   在 opencode.json 的 `options.sites` 配一个条目，**框架代码零改动**。
-- **工具清单（12 个，namespace `auth_login`）**：sites / login / accounts / status / token / refresh /
-  logout / run_activities / manual_token / daily / render_qr / qr_image_path。
+- **工具清单（13 个，namespace `auth_login`）**：sites / login / accounts / status / token / refresh /
+  logout / run_activities / manual_token / daily / **import_accounts** / render_qr / qr_image_path。
 - **账号池（多账户/站 + 两种扫码场景，用户需求驱动）**：
   - `auth_login_login` 参数 `mode`：`add`（默认）= **扫码添加**账户（临时槽 `_new_<ts>` 扫码，确认后以
     `user.username` 落盘入池，如 `accounts/kimcrowing.json`）；`update` = **扫码更新**指定 `account`
@@ -132,9 +132,10 @@
 ## 3. 验证（CI + 本机）
 
 - CI：`verify.sh`（通用，已加入 auth-login 为第 4 个 shipped 插件）+ `verify-auth-login.sh`（专项，
-  断言 12 个 `auth_login_*` 工具 ID（含 `auth_login_daily`）；端口 `41847`，sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
+  断言 13 个 `auth_login_*` 工具 ID（含 `auth_login_daily` / `auth_login_import_accounts`）；端口 `41847`，
+  sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
 - 本机冒烟：`tmp/opencode/auth_smoke2.sh`（用 `~/opencode2/bin/opencode2` + tagfix LD_PRELOAD）——
-  **已实测 PASS**：插件 `status:active`、无非 active 插件、12 个工具 ID 齐全。
+  **已实测 PASS**：插件 `status:active`、无非 active 插件、13 个工具 ID 齐全。
 - 框架端到端（node 直测，无需 opencode）：`tmp/opencode/auth_test.mjs`（mock provider：生成二维码→
   轮询确认→拿 token→跑活动→持久化→logout）——**已实测 PASS**，且 mock 二维码 PNG 可被在线解码还原。
 - **账号池端到端（2026-09-07 新增，`tmp/opencode/auth_pool_test.mjs`）——已实测 PASS**：mock provider 验证
@@ -154,3 +155,57 @@
 - **微信小程序码不能本地重编码**：core.startLogin 对 `generateQr()` 返回**对象** `{base64|path, ascii}` 时
   直供服务端 PNG 落盘；返回字符串才走本地 QR 渲染。GitCode 的 `generateQr()` 必须返回 `{base64}`。
 - 目录插件是 ESM，**禁止 `require`**（沿用三插件契约）；本插件只用 `import`。
+
+## 5. CodeBuddy 适配器 + credential 同步（方案 A，2026-09-07 全实测）
+
+**接入背景**：用户需求——CodeBuddy 登录态让「模型加载（codebuddy/hy3）+ 补丁内置自动签到 + auth-login 每日积分任务」
+共用同一 token。方案 A：auth-login 登录/刷新成功后把 `{access, refresh}` 写进 opencode credential 表
+（integration_id=`codebuddy`，methodID=`ioa`）；opencode 内置 codebuddy provider 的 integration
+`connection.active()` 每次现查 db（上游源码实证无缓存）→ **直写即生效，无需重启**。
+
+### 端点实证（全部 2026-09-07 真机实测，勿猜改）
+- **IOA 登录（copilot.tencent.com）**：`POST /v2/plugin/auth/state?platform=VSCode&ioa=1`（noAuth 头、无 body）
+  → `{code:0, data:{state, authUrl}}`；`GET /v2/plugin/auth/token?state=` 未确认返回 code:11217。
+- **★ refresh 端点实测更正（2026-09-07，推翻了补丁 ioa.ts 的形状）**：
+  `POST https://copilot.tencent.com/v2/plugin/auth/token/refresh` 必须带 **`X-Refresh-Token: <refreshToken>` 头**
+  （可同时带 `Authorization: Bearer <RT>`，但**纯 Bearer 无 X-Refresh-Token 必 400** `{"code":10001,"msg":"refreshToken is empty"}`；
+  body/query 传 refreshToken/refresh_token 也全部实测 400）。无 body。
+  响应 `{code:0, data:{accessToken, refreshToken(轮换!), expiresIn(秒=60天), tokenType, scope, ...}}`：
+  **refreshToken 每次轮换**，必须取新值落盘，否则下次刷新用旧 RT 被拒。
+  另：补丁 ioa.ts 的 `ioaRefreshToken` 与公开仓库 cainiao1992/dsh-codebuddy-auth 的实现都是纯 Bearer（均未实测），
+  以本次 `X-Refresh-Token` 实测为准，勿再照抄纯 Bearer 形状。
+- **成长/积分（copilot.tencent.com，纯 Bearer + fetchRetry 兜 APISIX 偶发 401）**：
+  `GET /v2/activity/growth/tasks` → `{code:0, data:{tasks:[{task_code, accept_status, progress, reward_credit}]}}`
+  （accept_status=completed 才可领）；`POST /activity/growth/tasks/{task_code}/claim`（无 /v2 前缀）未完成 400
+  「task not completed」；`GET /activity/growth/lottery/chances` → `{balance}`；`POST /activity/growth/lottery/draw`
+  body `{client_token: uuid}`；`GET /v2/activity/growth/profile`。
+- **礼包（www.codebuddy.cn，Bearer + X-Domain + X-User-Id(uid=JWT sub)）**：
+  `POST /billing/meter/claim-gift` → `{code:10001,"每人限领一次…"}` = 已领（幂等，provider 按 ok 处理）；
+  `GET /billing/meter/check-gift-claimed` 实测 404 不存在，勿用。
+
+### credential 同步（credential-sync.mjs + provider.syncCredentialSafe）
+- **双库写入**：`~/.local/share/opencode/opencode.db` 与 `opencode-.db` 都写（dbPaths() 探测既存库）；
+  driver 自适应 node:sqlite → bun:sqlite（**已实测插件宿主可用**，import_accounts 首次调用即成功读表）；
+  都不可用才降级「仅 storage」并警告。
+- **makeActive 语义**：`true`（登录成功/手动注入/import 后同步）→ 同 integration 旧行全部 active=0、本行 active=1；
+  `false`（每日 refresh）→ **只滚动 token**：UPDATE 分支保持既有 active（主库 active 账号不会被每日轮询拨乱），
+  但 **INSERT 分支（该库原本无此行）active 写 0**——实测 opencode.db（--service 冗余库，原 credential 空）
+  的 3 行全 inactive，而主库 opencode-.db 的 18623190160 保持 active=1。**此差异无实际影响**（--service 旧
+  serve 本来没有 codebuddy 连接；import_accounts 去重取 active 优先，主库数据为准）。
+- **value JSON 形状**：`{"type":"oauth","methodID":"ioa","refresh","access","expires"(ms),"metadata":{"uid"}}`；
+  id 用 `cred_` + 上游同构时间戳编码。
+
+### import_accounts（第 13 个工具，server.ts）
+- `auth_login_import_accounts {site:"codebuddy"}`：读 credential 表（listOpencodeCredentials，双库去重
+  取 active/新 expires）→ 每账号 provider.manualToken 构造会话 → persistSession 入 auth-login 账号池。
+  **不写回 credential 表**（import 只是把已有凭据导入池，防止循环写）。
+- 实测导入本机 credential 表 3 个 codebuddy 账号：`18623190160`（opencode active，昵称 Kim）、
+  `15123837998`（同恒源-秦京）、`13983704720`（lit）——storage/codebuddy/accounts/<手机号>.json 三文件落盘。
+
+### daily 多账户轮询实测（2026-09-07）
+- `auth_login_daily {site:"codebuddy", force:true}` 对 3 账号**逐个**：真实 IOA refresh（X-Refresh-Token 头，
+  token 轮换 60 天续期，3 账号 3 秒内依次完成=轮询节奏正常）→ 3 个活动打真实端点：
+  成长任务领奖（tasks code:0，15/16/16 个任务无 completed 可领）、幸运抽奖（chances balance:0「今日无抽奖次数」）、
+  新手礼包（claim-gift 10001 幂等「已领取过」）——**3 账号全部 executed、0 skipped**。
+- **幂等**：不 force 再跑 → 3 账号全部「今日已完成」skip（daily-meta.json 落盘生效）。
+- 刷新后 credential 表同步验证：3 行 token 均换新（exp=now+60 天）、无重复行、18623190160 保持 active=1。
