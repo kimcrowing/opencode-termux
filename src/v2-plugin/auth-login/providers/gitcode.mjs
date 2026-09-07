@@ -545,8 +545,12 @@ export default {
   },
 
   async claimAll(s) {
-    // 1) 未领取任务列表
-    const listRes = await fetch(`${API}/uc/api/v1/task/unclaimed?__s=aihub`, { headers: this.headers(s.token) });
+    // 1) 待领取列表：「每日待领」以 /uc/api/v1/task/v2/uncompleted 的 status==0 为准。
+    //    【坑（2026-09-07 实测，已修复）】/uc/api/v1/task/unclaimed 端点实测**恒返回空 body**（含已结算
+    //    status=0 可领任务也漏报：2026-09-08 实测 uncompleted 有 6 个可领、unclaimed 返回空 → 自动领取
+    //    从未生效）。uncompleted 返回 {starter_task,daily_task,normal_task} 三数组，status=0=待领取、
+    //    1=已领、2=未完成（同 id 会跨数组重复出现，按 task_id 去重再逐个领）。
+    const listRes = await fetch(`${API}/uc/api/v1/task/v2/uncompleted?limit=100&__s=aihub`, { headers: this.headers(s.token) });
     const listText = await listRes.text();
     let list = null;
     if (listText.trim()) {
@@ -554,8 +558,14 @@ export default {
         list = JSON.parse(listText);
       } catch {}
     }
-    const arr = Array.isArray(list) ? list : Array.isArray(list?.data) ? list.data : Array.isArray(list?.list) ? list.list : null;
-    if (!arr || arr.length === 0) {
+    const byId = new Map();
+    for (const key of ["starter_task", "daily_task", "normal_task"]) {
+      for (const t of Array.isArray(list?.[key]) ? list[key] : []) {
+        if (t && t.status === 0 && t.task_id != null) byId.set(t.task_id, t);
+      }
+    }
+    const arr = [...byId.values()];
+    if (arr.length === 0) {
       return { status: listRes.status, ok: true, message: "当前没有待领取的积分任务", claimed: [] };
     }
     // 2) 逐个领取

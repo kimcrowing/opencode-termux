@@ -74,7 +74,12 @@
     `"今日已签到，明天记得来签到哦。"`（次日再签）。
   - 签到状态：`GET /uc/api/v1/task/v2/sign_status?__s=aihub` →
     `{award_index, is_sign_in, scores:[7,7,14,7,7,7,21], growths:[...]}`（7 天循环积分序列）。
-  - 待领列表：`GET /uc/api/v1/task/unclaimed?__s=aihub` → 无待领时 200 **空 body**（不要当异常）。
+  - 待领列表：**`GET /uc/api/v1/task/unclaimed?__s=aihub` 实测恒返回 200 空 body（含 status=0 可领任务
+    也漏报），不可用于自动领取**——claim_all 曾依赖它导致积分从不自动领（2026-09-08 实证修复）。
+    真实待领以 **`GET /uc/api/v1/task/v2/uncompleted?limit=100` 的 `status==0`** 为准：
+    响应 `{starter_task,daily_task,normal_task}` 三数组（status: 0=待领取/1=已领/2=未完成；
+    同一 task_id 会跨数组重复），claimAll 遍历三数组按 `task_id` 去重后逐个
+    `POST /uc/api/v1/task/{id}/points` 领取（2026-09-08 端到端实测：kimcrowing 4 个滞留任务一次领全）。
   - 领取：`POST /uc/api/v1/task/{id}/points?__s=aihub`（id 取 unclaimed 列表，静态 JS 定义实证）。
   - 任务详情：`GET /uc/api/v1/task/{id}?__s=aihub`。
 - 活动配置（opencode.json 插件 options.sites.gitcode.activities）：
