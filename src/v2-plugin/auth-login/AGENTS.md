@@ -40,9 +40,13 @@
     body（**form-urlencoded**，非 JSON）`refresh_token=...`；头 `Authorization: Bearer <旧access_token>` +
     `content-type: application/x-www-form-urlencoded` + app headers→ 200 扁平 `{access_token, refresh_token}`，
     新 token 续期 24h，旧 token 宽限期内不立即失效；refresh_token 很长命可复用。
-- **二维码在 web UI 呈现的机制（实测确认）**：工具返回 ASCII（任何 UI 直接显示）+ PNG 文件路径；
-  agent 用 `read` 工具读 PNG，tool-result 图片会在 opencode 会话中渲染。`auth_login_qr_image_path`
-  专门返回路径供 agent read。
+- **二维码在 web UI 呈现的机制（实测确认，含 2026-09-07 补充更正）**：工具返回 ASCII（任何 UI 直接显示）+ PNG 文件路径。
+  呈现首选 **markdown 引用本地路径**：`![](<绝对路径>)`——由 web UI 的 markdown 渲染层直读本地文件，**不依赖模型视觉能力**，
+  实测 storage 下绝对路径（`…/auth-login/storage/codebuddy/qr-*.png`）与复制到 `/data/data/com.termux/files/usr/tmp/opencode/`
+  的副本都能正常显示（2026-09-07 用户确认「两个都显示正常」）。
+  **坑**：`read` 工具读 PNG 依赖当前模型的图片输入能力——不支持图片输入的模型会报
+  `Cannot read … (this model does not support image input)`，不能作为二维码呈现手段；此时直接用 markdown 引用路径。
+  `auth_login_qr_image_path` 返回路径供 agent 引用/read。
 
 ## 2. GitCode 适配器现状（重要，全部端点已抓包+JS bundle 实证，勿猜/勿改）
 
