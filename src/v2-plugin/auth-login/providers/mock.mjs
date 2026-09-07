@@ -40,6 +40,18 @@ export default {
     return token ? { Authorization: `Bearer ${token}` } : {};
   },
 
+  // 模拟 token 刷新（GitCode 每日续期 24h 的行为）：换新 token 并计数，供测试断言
+  async refresh(s) {
+    s.mockRefreshCount = (s.mockRefreshCount || 0) + 1;
+    return {
+      ok: true,
+      token: `mock-token-${Date.now()}`,
+      cookies: { access_token: `mock-token-${Date.now()}` },
+      headers: this.headers(`mock-token-${Date.now()}`),
+      user: s.user,
+    };
+  },
+
   async executeActivity(s, def) {
     // 模拟：回显活动
     return { simulated: true, activity: def.name, withToken: !!s.token, account: s.user?.username || s._accountId };

@@ -19,8 +19,8 @@
 - **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock）。每个适配器实现 `generateQr()/pollStatus()/
   headers()/manualToken()` 等（文本二维码也可用 `loginUrl()`）；接入新网站 = 新建一个 provider 文件 +
   在 opencode.json 的 `options.sites` 配一个条目，**框架代码零改动**。
-- **工具清单（11 个，namespace `auth_login`）**：sites / login / accounts / status / token / refresh /
-  logout / run_activities / manual_token / render_qr / qr_image_path。
+- **工具清单（12 个，namespace `auth_login`）**：sites / login / accounts / status / token / refresh /
+  logout / run_activities / manual_token / daily / render_qr / qr_image_path。
 - **账号池（多账户/站 + 两种扫码场景，用户需求驱动）**：
   - `auth_login_login` 参数 `mode`：`add`（默认）= **扫码添加**账户（临时槽 `_new_<ts>` 扫码，确认后以
     `user.username` 落盘入池，如 `accounts/kimcrowing.json`）；`update` = **扫码更新**指定 `account`
@@ -30,6 +30,16 @@
   - 内存 key = `siteId::accountId`；add 确认后从临时 key 迁移到 `siteId::username` 并删旧文件。
   - 迁移兼容：旧 `storage/<site>.json` 首次 `accountIds()` 时自动迁为 `accounts/<username|default>.json` 并删旧文件。
   - 活动执行带 20s 单活动超时保护（Promise.race），单活动挂死不拖跨整批/整池。
+  - **每日自动任务（2026-09-07 新增）**：`daily` 工具 + 插件自动调度——serve 启动后对配置了 activities 的站点
+    每 ~30min 检查一次日期变化，每天每账户最多执行一次（`storage/<site>/daily-meta.json` 记
+    perAccount 日期，幂等；`daily:false` 关闭调度，`dailyIntervalMin` 调间隔）。
+    重启丢失的当日任务在下次启动时自动补跑。执行前先 `refresh()` 滚动 token（GitCode 续期 24h，
+    解决 access_token「次日过期」问题；refresh 失败该账户跳过并提示扫码更新）。<br>
+    **refresh 端点（2026-09-07 JS bundle 实证，勿猜改）**：
+    `POST https://web-api.gitcode.com/uc/api/v1/user/token/refresh?__s=aihub`
+    body（**form-urlencoded**，非 JSON）`refresh_token=...`；头 `Authorization: Bearer <旧access_token>` +
+    `content-type: application/x-www-form-urlencoded` + app headers→ 200 扁平 `{access_token, refresh_token}`，
+    新 token 续期 24h，旧 token 宽限期内不立即失效；refresh_token 很长命可复用。
 - **二维码在 web UI 呈现的机制（实测确认）**：工具返回 ASCII（任何 UI 直接显示）+ PNG 文件路径；
   agent 用 `read` 工具读 PNG，tool-result 图片会在 opencode 会话中渲染。`auth_login_qr_image_path`
   专门返回路径供 agent read。
@@ -124,6 +134,9 @@
 - **账号池端到端（2026-09-07 新增，`tmp/opencode/auth_pool_test.mjs`）——已实测 PASS**：mock provider 验证
   add×2 入池（user-1/user-2）→ update user-1 续期（token 变、不新增）→ run_activities 全池/单账户 →
   getStatus 全池/单账户 → logout 单账户/全清 → manual_token 注入 → 旧版单文件迁移。
+- **每日任务引擎 + refresh（2026-09-07 新增，全部 PASS）**：
+  `auth_daily_test.mjs`（mock：幂等/force/单账户/无活动配置/meta 落盘/**执行前自动 refresh**/refresh 失败→跳过需扫码更新）
+  与 `gc_daily_e2e.mjs`（真实 gitcode：refresh 续期 24h + 签到"今日已签到" + claim_all"无待领"，存储 token 已更新）。
 - GitCode 真端点端到端（2026-09-07，全部 PASS）：`gc_plugin_test.mjs`（manualToken 解码 user=kimcrowing +
   signIn 返回 400"今日已签到" + claimAll 无待领）、`gc_qr_test2.mjs`（generateQr 生成合法 PNG 小程序码 +
   pollStatus=WAITING）、`gc_core_e2e.mjs`（core.startLogin 直供 PNG 落盘 + runActivities 逐项 ok + logout）。

@@ -167,7 +167,6 @@ function getSession(siteId, accountId) {
   return sessions.get(key);
 }
 
-// 供外部（如手动注入 token 后）把内存会话 state 持久化到磁盘。
 // 兼容旧签名 persistSession(siteId, session)；新签名 persistSession(siteId, accountId, session)。
 export function persistSession(siteId, accountId, s) {
   if (accountId && typeof accountId === "object") {
@@ -182,6 +181,90 @@ export function persistSession(siteId, accountId, s) {
     user: s.user,
     savedAt: s.savedAt,
   });
+}
+
+// ---------- 每日自动任务（每日一次/每账户幂等） ----------
+
+function dailyMetaPath(siteId) {
+  return path.join(storageDir(siteId), "daily-meta.json");
+}
+
+/** 本地日期 YYYY-MM-DD（用于每日任务幂等判定）。 */
+export function todayStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+export function loadDailyMeta(siteId) {
+  try {
+    const p = dailyMetaPath(siteId);
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function saveDailyMeta(siteId, meta) {
+  try {
+    fs.writeFileSync(dailyMetaPath(siteId), JSON.stringify(meta, null, 2), "utf-8");
+  } catch (e) {
+    console.error(`[auth-login] save daily meta ${siteId} failed: ${e.message}`);
+  }
+}
+
+/**
+ * 【每日自动任务】对站点账号池执行配置的活动列表，每天每账户最多一次（幂等）。
+ * 设计：serve 启动时调用一次 + 定时器每 ~30min 检查一次（日期变化即补跑），
+ *       重启丢失的当日任务会在下次启动时补执行。
+ * @param {object} site 站点适配器（site.cfg.activities 为每日活动列表）
+ * @param {object} opts { account?: string（只跑指定账户）, force?: boolean（覆盖当日已完成标记） }
+ * @returns {Promise<object>} { site, date, executed: [{account, results}], skipped: [{account, reason}] }
+ */
+export async function ensureDaily(site, opts = {}) {
+  const siteId = String(site.id || "site");
+  const acct = opts.account ? String(opts.account) : "";
+  const force = !!opts.force;
+  const defs = Array.isArray(site.cfg?.activities) ? site.cfg.activities : [];
+  const meta = loadDailyMeta(siteId) || { perAccount: {}, lastRun: 0 };
+  meta.perAccount = meta.perAccount || {};
+  const date = todayStr();
+
+  if (!defs.length) {
+    return { site: siteId, date, executed: [], skipped: [], message: "该站点未配置每日活动（options.sites.<id>.activities）" };
+  }
+
+  const targets = acct ? [acct] : accountIds(siteId);
+  const summary = { site: siteId, date, executed: [], skipped: [] };
+  for (const a of targets) {
+    const s = getSession(siteId, a);
+    if (!force && meta.perAccount[a] === date) {
+      summary.skipped.push({ account: a, reason: "今日已完成" });
+      continue;
+    }
+    if (!s.token && !s.cookies) {
+      summary.skipped.push({ account: a, reason: "未登录（先扫码添加/更新账户）" });
+      continue;
+    }
+    // 执行前先尝试 refresh 滚动 token（适配器实现了 refresh() 时；如 GitCode 每日续期 24h）。
+    // refresh 失败（refresh_token 失效）→ 该账户跳过，标记需扫码更新，避免用死 token 白打接口。
+    if (typeof site.refresh === "function") {
+      const fr = await forceRefresh(site, a);
+      if (!fr.ok && s.token) {
+        summary.skipped.push({ account: a, reason: `token 刷新失败（${fr.message}），需扫码更新账户` });
+        continue;
+      }
+    }
+    const run = await runActivities(site, defs, { account: a });
+    const results = run.accounts?.[0]?.results || [];
+    meta.perAccount[a] = date;
+    meta.lastRun = Date.now();
+    summary.executed.push({ account: a, results });
+  }
+  saveDailyMeta(siteId, meta);
+  return summary;
 }
 
 /**
@@ -356,7 +439,7 @@ export async function forceRefresh(site, accountId, opts = {}) {
     if (r.token || r.cookies) {
       s.token = r.token ?? s.token;
       s.cookies = r.cookies ?? s.cookies;
-      s.headers = r.headers ?? r.headers;
+      s.headers = r.headers ?? s.headers;
       s.user = r.user ?? r.user;
       s.savedAt = Date.now();
       s.state = SITE_STATE.CONFIRMED;

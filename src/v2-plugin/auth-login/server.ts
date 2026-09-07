@@ -44,6 +44,33 @@ const B = (description: string) => ({ type: "boolean", description });
 // 站点配置（来自 opencode.json options.sites）与已加载的 provider。
 let sites: Record<string, any> = {};
 let providers: Record<string, any> = {};
+// 每日自动任务调度（serve 存活期间定时检查日期变化，幂等补跑；dispose 时清理）。
+const dailyTimers: ReturnType<typeof setInterval>[] = [];
+const dailyRunning = new Map<string, boolean>();
+
+async function runDailyOnce(cfg: any, provider: any) {
+  const key = String(cfg.site || "");
+  if (!key || dailyRunning.get(key)) return;
+  dailyRunning.set(key, true);
+  try {
+    const merged = Object.assign({}, provider, { cfg });
+    const r = await core.ensureDaily(merged, {});
+    const n = (r.executed || []).length;
+    if (n > 0) console.log(`[auth-login] daily ${key}: 执行 ${n} 个账户每日任务`);
+  } catch (e: any) {
+    console.error(`[auth-login] daily ${key} error: ${e.message}`);
+  } finally {
+    dailyRunning.delete(key);
+  }
+}
+
+function startDailyScheduler(cfg: any, provider: any) {
+  const intervalMin = Math.max(Number(cfg.dailyIntervalMin || 30) || 30, 5); // 至少 5 分钟
+  const t = setInterval(() => runDailyOnce(cfg, provider), intervalMin * 60 * 1000);
+  dailyTimers.push(t);
+  // 启动后延迟 10s 首次执行（避让插件加载期；无 activities/无账户时 ensureDaily 自动跳过）
+  setTimeout(() => runDailyOnce(cfg, provider), 10000);
+}
 
 async function loadProvider(siteId: string) {
   if (providers[siteId]) return providers[siteId];
@@ -279,6 +306,29 @@ const TOOLS: ToolDef[] = [
       }),
   },
   {
+    name: "daily",
+    description:
+      "【每日自动任务】对某站点账号池执行配置的每日活动（签到/领分/成长任务等），每天每账户最多一次（幂等）。" +
+      "插件启动后会自动调度（serv开期间每 ~30 分钟检查日期变化补跑，重启丢失的当日任务下次启动补执行）；" +
+      "此工具用于查看执行结果或手动触发。force=true 可无视当日已完成标记强制重跑。",
+    input: props({
+      site: S("站点 id，如 gitcode"),
+      account: S("账户标识（user.username），可选；缺省对账号池全部账户执行"),
+      force: B("true=忽略当日已完成标记强制重跑（默认 false）"),
+    }),
+    options: { namespace: "auth_login" },
+    execute: (a) =>
+      toolResult(async () => {
+        const cfg = siteOf(a);
+        const provider = await loadProvider(cfg.site || (a.site as string));
+        const merged = Object.assign({}, provider, { cfg });
+        const opts: any = {};
+        if (a.account) opts.account = String(a.account);
+        if (a.force) opts.force = true;
+        return core.ensureDaily(merged, opts);
+      }),
+  },
+  {
     name: "render_qr",
     description:
       "把任意文本渲染成二维码（PNG 落盘 + ASCII 返回）。用于把非登录字符串（如某链接）也生成二维码。",
@@ -349,7 +399,19 @@ export default {
       }
     });
 
+    // 【每日自动任务】对配置了每日活动的站点启动调度（默认开启；daily:false 关闭）。
+    // 时序：注册完成后再启动，启动 10s 后首跑 + 每 ~30min 检查（ensureDaily 幂等，安全）。
+    for (const [id, cfg] of Object.entries<any>(configured)) {
+      const hasActivities = Array.isArray(cfg.activities) && cfg.activities.length > 0;
+      if (!hasActivities || cfg.daily === false) continue;
+      loadProvider(id)
+        .then((provider) => startDailyScheduler(Object.assign({}, cfg, { site: cfg.site || id }), provider))
+        .catch((e: any) => console.error(`[auth-login] daily scheduler ${id} init failed: ${e.message}`));
+    }
+
     return async () => {
+      for (const t of dailyTimers) clearInterval(t);
+      dailyTimers.length = 0;
       await registration.dispose();
     };
   },

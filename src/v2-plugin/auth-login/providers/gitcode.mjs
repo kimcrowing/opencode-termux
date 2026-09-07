@@ -223,6 +223,52 @@ export default {
     };
   },
 
+  // 刷新 access token（2026-09-07 JS bundle 实证）：
+  //   POST https://web-api.gitcode.com/uc/api/v1/user/token/refresh
+  //   body(form-urlencoded): refresh_token=...   响应体扁平 { access_token, refresh_token }
+  //   实测：200 后新 access_token 续期 24h（旧 token 宽限期内仍 200，不立即失效），幂等可每天调用。
+  async refresh(s) {
+    const refreshToken = (s.cookies && s.cookies.refresh_token) || s.refreshToken || "";
+    if (!refreshToken) {
+      return { ok: false, message: "缺少 refresh_token（重新扫码登录后可获得）" };
+    }
+    const body = new URLSearchParams({ refresh_token: refreshToken }).toString();
+    let res;
+    try {
+      res = await fetch(`${API}/uc/api/v1/user/token/refresh?__s=aihub`, {
+        method: "POST",
+        headers: Object.assign(
+          { Authorization: `Bearer ${s.token || ""}`, "content-type": "application/x-www-form-urlencoded" },
+          appHeaders()
+        ),
+        body,
+      });
+    } catch (e) {
+      return { ok: false, message: `refresh 网络异常: ${e.message}` };
+    }
+    const text = await res.text();
+    let j = null;
+    try {
+      j = JSON.parse(text);
+    } catch {}
+    if (!res.ok) {
+      const msg = j?.error_message || j?.error || text.slice(0, 150);
+      return { ok: false, message: `refresh HTTP ${res.status}: ${msg}` };
+    }
+    const token = extractToken(j);
+    if (!token) return { ok: false, message: `refresh 响应无 access_token: ${text.slice(0, 200)}` };
+    const newRefresh = (j && (j.refresh_token || j.refreshToken)) || "";
+    const payload = decodeJwtPayload(token);
+    return {
+      ok: true,
+      token,
+      refreshToken: newRefresh,
+      cookies: { access_token: token, refresh_token: newRefresh },
+      headers: this.headers(token),
+      user: payload ? { username: payload.sub, payload } : (s.user || null),
+    };
+  },
+
   // 鉴权请求头：Bearer + app headers
   headers(token) {
     return token ? Object.assign({ Authorization: `Bearer ${token}` }, appHeaders()) : appHeaders();
@@ -234,6 +280,15 @@ export default {
   //   cann_star / download_ai_file / complete_profile / enable_readme 为实证活动（见注释）；
   //   其他 type 回退通用请求（def.method/path/body）。
   async executeActivity(s, def) {
+    // 活动定义账户级模板替换：def 里的 {username} → 当前账户 user.username
+    // （典型用于 daily_update 的 repo "kimcrowing/xcpquery" → 各账户自己的仓库 "{username}/xcpquery"）。
+    const raw = def || {};
+    def = {};
+    for (const [k, v] of Object.entries(raw)) {
+      def[k] = typeof v === "string"
+        ? v.replace(/\{username\}/g, (s.user && s.user.username) || "")
+        : v;
+    }
     const type = String(def.type || "");
     if (type === "sign_in" || type === "sign-in" || type === "signin") return this.signIn(s);
     if (type === "claim_all" || type === "claim") return this.claimAll(s);

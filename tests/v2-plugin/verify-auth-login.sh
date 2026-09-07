@@ -13,7 +13,7 @@
 #   1. GET /api/plugin lists the auth-login plugin, and no plugin reports failed.
 #   2. The plugin wrote AUTH_LOGIN_VERIFY_SENTINEL containing the host-composed
 #      tool ids from editor.list(); every expected `auth_login_<name>` id must be
-#      present, proving namespace composition over all 11 tools.
+#      present, proving namespace composition over all 12 tools.
 #
 # The binary under test is expected at $1 and must be executable.
 set -euo pipefail
@@ -128,7 +128,7 @@ head -80 "$WORK/server.log"
 
 FAILURES=0
 
-EXPECTED_IDS="auth_login_sites auth_login_login auth_login_accounts auth_login_status auth_login_token auth_login_refresh auth_login_logout auth_login_run_activities auth_login_manual_token auth_login_render_qr auth_login_qr_image_path"
+EXPECTED_IDS="auth_login_sites auth_login_login auth_login_accounts auth_login_status auth_login_token auth_login_refresh auth_login_logout auth_login_run_activities auth_login_manual_token auth_login_daily auth_login_render_qr auth_login_qr_image_path"
 if [[ ! -f "$WORK/auth-login-sentinel.json" ]]; then
   echo "::error::auth-login sentinel missing (plugin never registered tools)"
   echo "::error::full expected ids: $EXPECTED_IDS"
