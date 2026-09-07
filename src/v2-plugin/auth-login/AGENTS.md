@@ -66,6 +66,22 @@
 - 活动配置（opencode.json 插件 options.sites.gitcode.activities）：
   `[{name:"每日签到",type:"sign_in"},{name:"领取待领积分",type:"claim_all"}]`，走 provider
   `executeActivity()` 专用逻辑；其他 type 回退通用请求。
+- **账号池部署配置示例（多账户场景）**：options.sites 的 activities 是**站点级**（同一站点全部账户共享同一套
+  活动，`run_activities` 缺省 account 时遍历账号池每个账户执行）：
+  ```jsonc
+  "plugins": [{ "package": "…/src/v2-plugin/auth-login", "options": {
+    "sites": { "gitcode": { "name": "GitCode", "activities": [
+      { "name": "每日签到",       "type": "sign_in" },
+      { "name": "领取待领积分",   "type": "claim_all" },
+      { "name": "下载模型文件",   "type": "download_ai_file" },
+      { "name": "每日Star",       "type": "daily_star" },
+      { "name": "查看热门",       "type": "daily_view" },
+      { "name": "每日分享",       "type": "daily_invite" }
+    ]}}
+  }}]
+  ```
+  加第二/更多账户：`auth_login_login {site:"gitcode", mode:"add"}`（每次扫码确认一个新账户入池；
+  token 过期或个人需要续期时 `mode:"update", account:"<username>"` 重扫覆盖，不新增）。
 - **成长中心任务实证（2026-09-07 全部抓包+页面点击实测，已固化进 executeActivity 新活动类型）**：
   任务机制 = **行为触发 + 服务端结算**：做真实动作/上报 → compile_time 记录 → status 变 0（待领取）
   → `POST /uc/api/v1/task/{id}/points` 领分；部分任务（关注CANN/Star CANN/访问CANN）结算后自动发放
