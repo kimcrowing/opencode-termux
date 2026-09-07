@@ -117,16 +117,32 @@ export async function startLogin(site, opts = {}) {
     s.lastError = `生成二维码失败: ${e.message}`;
     return summarize(site, s, false);
   }
-  s.qrText = qrText;
+  s.qrText = typeof qrText === "string" ? qrText : "(provider 直供图片二维码)";
 
   // 渲染 PNG + ASCII，落盘到 storage/<site>/qr-<ts>.png
   const { renderQrToFile } = await import("./provider-qr.mjs");
   let qrPath = "";
   let qrAscii = "";
   try {
-    const out = await renderQrToFile(site.id, qrText);
-    qrPath = out.path;
-    qrAscii = out.ascii;
+    if (qrText && typeof qrText === "object") {
+      // 站点适配器直接提供二维码图片（如微信小程序码，本地无法重编码）：
+      //   { base64: "iVBOR..." }  → 落盘 PNG
+      //   { path: "/abs/qr.png" } → 直接引用文件
+      const dir = path.join(__dir, "storage", String(site.id));
+      fs.mkdirSync(dir, { recursive: true });
+      if (qrText.base64) {
+        const buf = Buffer.from(String(qrText.base64).replace(/^data:image\/png;base64,/, ""), "base64");
+        qrPath = path.join(dir, `qr-${Date.now()}.png`);
+        fs.writeFileSync(qrPath, buf);
+      } else if (qrText.path) {
+        qrPath = String(qrText.path);
+      }
+      qrAscii = typeof qrText.ascii === "string" ? qrText.ascii : `[${site.id}] 扫码登录二维码已生成（图片路径：${qrPath}）`;
+    } else {
+      const out = await renderQrToFile(site.id, qrText);
+      qrPath = out.path;
+      qrAscii = out.ascii;
+    }
   } catch (e) {
     s.lastError = `二维码渲染失败: ${e.message}`;
   }

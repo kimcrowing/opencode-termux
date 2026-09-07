@@ -15,29 +15,76 @@
   - `provider-qr.mjs`：把文本渲染成 `storage/<site>/qr-*.png` + ASCII。
   - `core.mjs`：扫码登录状态机 + 后台轮询 + token 持久化（`storage/<site>.json`，参照 uyanip session.json 模式）
     + 活动执行器。
-- **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock）。每个适配器实现 `loginUrl()/pollStatus()/
-  headers()/manualToken()` 等；接入新网站 = 新建一个 provider 文件 + 在 opencode.json 的
-  `options.sites` 配一个条目，**框架代码零改动**。
+- **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock）。每个适配器实现 `generateQr()/pollStatus()/
+  headers()/manualToken()` 等（文本二维码也可用 `loginUrl()`）；接入新网站 = 新建一个 provider 文件 +
+  在 opencode.json 的 `options.sites` 配一个条目，**框架代码零改动**。
 - **工具清单（10 个，namespace `auth_login`）**：sites / login / status / token / refresh / logout /
   run_activities / manual_token / render_qr / qr_image_path。
 - **二维码在 web UI 呈现的机制（实测确认）**：工具返回 ASCII（任何 UI 直接显示）+ PNG 文件路径；
   agent 用 `read` 工具读 PNG，tool-result 图片会在 opencode 会话中渲染。`auth_login_qr_image_path`
   专门返回路径供 agent read。
 
-## 2. GitCode 适配器现状（重要，勿猜端点）
+## 2. GitCode 适配器现状（重要，全部端点已抓包+JS bundle 实证，勿猜/勿改）
 
-- GitCode = AtomGit，GitLab 系。**网页端纯扫码（qrcode）接口在 SPA bundle 中已发现的只有微信小程序
-  相关**（`/api/v1/user/oauth/login/qrcode/wechat_mini_program` 等，带 `X-Source` 头），**网页端扫码
-  端点未确认**。
-- 因此 `providers/gitcode.mjs` 采用**双路径/配置驱动**：
-  - **方式 A（开箱即用，稳定）**：OAuth 授权码——二维码内容 = GitCode OAuth 授权页 URL
-    （`gitcode.com/oauth/authorize`，公开稳定；token 15 天可 refresh）；用户手机扫码→浏览器登录授权→
-    redirect 带 code（注意：**本地无 web 服务接收 redirect**，当前形态适合“手填 token/code”，
-    与 `auth_login_manual_token`/`exchangeCode` 配合）。
-  - **方式 B（待抓包确认）**：`sites.gitcode.qr.enabled=true` + `qr.generate_url`/`qr.check_url`/
-    `qr.state_map`/`qr.token_path` 等配置覆盖即可，框架会用配置发请求+解析字段，无需改代码。
-- **鉴权头**：REST v5 支持 `Authorization: Bearer` / `PRIVATE-TOKEN`（`api.gitcode.com/api/v5`）。
-- 上线前的必做：**用真实抓包确认 GitCode 网页扫码端点后填入配置**，或确认 OAuth 流程用户可接受。
+- **真实 API 域：`https://web-api.gitcode.com`**（不是 gitcode.com！），所有请求统一带 query
+  `__s=aihub`。此前 curl 401 的根因 = 域名错 + `X-Source: web`（应为 `toolbar_login`）+ 缺 `__s` 全错。
+- 登录 = 微信小程序扫码（**非 OAuth web 扫码**），三端点全实证：
+  1. 生成：`POST /uc/api/v1/qrcode/wechat_mini_program?__s=aihub`，body `{}`，头带
+     `X-Source: toolbar_login` → `{qrcode:"data:image/png;base64,...", scene_id}`。
+     **qrcode 是服务端生成的微信小程序码 PNG，本地 QR 编码器无法重编码** → provider `generateQr()`
+     返回 `{base64}`，core.mjs `startLogin` 检测对象返回后直接落盘 `storage/<site>/qr-<ts>.png`
+     （唯一时间戳文件名，防 web UI 浏览器缓存旧码）。
+  2. 轮询：`GET /uc/api/v1/qrcode/wechat_mini_program?scene_id=X&__s=aihub` →
+     `{"status":"WAITING"|"SCAN"|"LOGIN"|"TIMEOUT"}`。
+  3. login 换 token：`POST /uc/api/v1/user/oauth/login/qrcode/wechat_mini_program?scene_id=X&__s=aihub`
+     body `{}` 头带 `X-Source: toolbar_login`。未扫码 → 400 `{error_code:1000,error_message:"二维码已失效"}`
+     （业务错误非 401）；扫码后 → 200，响应体扁平 `{access_token, refresh_token}`（JS 源码
+     `O?.access_token` 实证）。页面行为：轮询到 SCAN/LOGIN 后自动调 login。
+- 状态机：`WAITING→SCAN→LOGIN→TIMEOUT`；**用户必须在小程序里点「确认登录」**，且 SCAN/LOGIN 后
+  若不调 login 换 token 会 TIMEOUT。二维码有效期约 2 分钟（provider 本地兜底 180s 过期）。
+- 轮询/生成/活动的通用 app headers（全实证）：`X-Platform:web X-OS-Version:Unknown X-Device-ID:unknown
+  X-App-Channel:gitcode-fe X-Device-Type:Windows X-App-Version:0 X-Network-Type:4g` + Referer
+  `https://ai.gitcode.com/`；生成与 login 额外带 `X-Source: toolbar_login`。
+- 签到/积分（`Authorization: Bearer <access_token>` + app headers，全实证）：
+  - 签到：`POST /uc/api/v1/task/sign-in?__s=aihub` body `{}` → 200 成功；400
+    `"今日已签到，明天记得来签到哦。"`（次日再签）。
+  - 签到状态：`GET /uc/api/v1/task/v2/sign_status?__s=aihub` →
+    `{award_index, is_sign_in, scores:[7,7,14,7,7,7,21], growths:[...]}`（7 天循环积分序列）。
+  - 待领列表：`GET /uc/api/v1/task/unclaimed?__s=aihub` → 无待领时 200 **空 body**（不要当异常）。
+  - 领取：`POST /uc/api/v1/task/{id}/points?__s=aihub`（id 取 unclaimed 列表，静态 JS 定义实证）。
+  - 任务详情：`GET /uc/api/v1/task/{id}?__s=aihub`。
+- 活动配置（opencode.json 插件 options.sites.gitcode.activities）：
+  `[{name:"每日签到",type:"sign_in"},{name:"领取待领积分",type:"claim_all"}]`，走 provider
+  `executeActivity()` 专用逻辑；其他 type 回退通用请求。
+- **成长中心任务实证（2026-09-07 全部抓包+页面点击实测，已固化进 executeActivity 新活动类型）**：
+  任务机制 = **行为触发 + 服务端结算**：做真实动作/上报 → compile_time 记录 → status 变 0（待领取）
+  → `POST /uc/api/v1/task/{id}/points` 领分；部分任务（关注CANN/Star CANN/访问CANN）结算后自动发放
+  （从未完成列表消失即完成，无需领取）。
+  - `daily_star`：`POST /api/v2/projects/{repoId}/star` body `{"repoId":10708627}`（cann/cannbot），
+    200 `{"star_count":9}`，重复幂等。
+  - `daily_view`（查看热门）：点首页推荐卡片 → 前端上报
+    `POST /api/v1/report?event_id=PC_PageClick` body
+    `{"repo_id":9709354,"module_name":"推荐_今日热门","page":1,"repo_index":0,"Project_card_star":"card"}`。
+  - `daily_invite`（每日分享）：`/setting/points?type=invite` 点「复制邀请链接」→
+    `POST /api/v1/report?event_id=page_click` body `{"button_name":"常规邀请_复制邀请链接_PC"}`。
+  - `daily_update`（每日更新项目）：`POST /api/v2/projects/{ns}/repository/commits`（GitLab 风格），
+    body 必须带 **`author_name` + `author_email` + `actions[].encoding:"base64"`（content 为 base64）**，
+    否则报「username参数错误」/「actions.encoding: param is missing」。push 后 compile 立即记录。
+  - `cann_follow`：`POST /uc/api/v1/follow` body `{"followedUsername":"cann","followType":1}` → +200 自动发放。
+  - `cann_star`：同 daily_star（repoId=10708627）→ +50 自动发放。
+  - `download_ai_file`：模型文件行点 resolve 下载 → `POST /api/v1/report?event_id=aihub_model_page_file_download`
+    body `{"aihub_model_name":"Qwen2.5-Omni-7B","aihub_model_path":"hf_mirrors/Qwen/Qwen2.5-Omni-7B",
+    "aihub_author_name":"xxm","aihub_file_name":".gitattributes"}`（+ GET `raw.gitcode.com/.../blobs/.../file`）。
+  - `complete_profile`（+20）：`POST /uc/api/v1/user/setting/save`，profile.description ≥10 字即完成。
+  - `enable_readme`（+10）：同 save 接口，profile 填 `readme_repo:"xcpquery"|"kimcrowing/xcpquery"`
+    （ns 格式 update_count=3）+ `readme_file_path:"README.md"` + `readme_branch:"main"` + `readme_switch:1`。
+  - 全量任务：`GET /uc/api/v1/task/v2/uncompleted?limit=100`（0=待领取/1=已领/2=未完成）；
+    任务列表：`GET /uc/api/v1/task?page=1&per_page=50&type=0|1`；当日统计：
+    `GET /uc/api/v1/task/unclaimed/tips_pc`、`/task/total-unclaimed-rewards`、`/score/will_expire`。
+  - **1小时内结算**：cann-star(104)/访问CANN(96)/模型任务等 completed 后需约 1h 才 status=0 可领。
+- 登录态持久化：`storage/gitcode.json`（格式 `{token,cookies,headers,user,savedAt}`，已被 .gitignore
+  忽略，禁止提交）；本机已注入抓包实测登录态（username=kimcrowing，access_token JWT 次日过期）。
+- **鉴权头**：Bearer + app headers（见上），不是 `api.gitcode.com/api/v5`（那是 REST 旧域，登录活动走 web-api）。
 
 ## 3. 验证（CI + 本机）
 
@@ -47,11 +94,14 @@
   **已实测 PASS**：插件 `status:active`、无非 active 插件、10 个工具 ID 齐全。
 - 框架端到端（node 直测，无需 opencode）：`tmp/opencode/auth_test.mjs`（mock provider：生成二维码→
   轮询确认→拿 token→跑活动→持久化→logout）——**已实测 PASS**，且 mock 二维码 PNG 可被在线解码还原。
+- GitCode 真端点端到端（2026-09-07，全部 PASS）：`gc_plugin_test.mjs`（manualToken 解码 user=kimcrowing +
+  signIn 返回 400"今日已签到" + claimAll 无待领）、`gc_qr_test2.mjs`（generateQr 生成合法 PNG 小程序码 +
+  pollStatus=WAITING）、`gc_core_e2e.mjs`（core.startLogin 直供 PNG 落盘 + runActivities 逐项 ok + logout）。
 
 ## 4. 关键坑/注意
 
 - **storage/ 目录含登录 token，已在 .gitignore 忽略**（`src/v2-plugin/auth-login/storage/`），禁止提交。
 - mock provider 仅用于自测，生产配置不要启用（或删除该文件）。
-- `gitcode.mjs` 的 `pollStatus` 在 OAuth 模式下**恒返回 pending**（OAuth 无轮询），登录完成靠
-  `manual_token` 注入，勿期待轮询自动确认。
+- **微信小程序码不能本地重编码**：core.startLogin 对 `generateQr()` 返回**对象** `{base64|path, ascii}` 时
+  直供服务端 PNG 落盘；返回字符串才走本地 QR 渲染。GitCode 的 `generateQr()` 必须返回 `{base64}`。
 - 目录插件是 ESM，**禁止 `require`**（沿用三插件契约）；本插件只用 `import`。

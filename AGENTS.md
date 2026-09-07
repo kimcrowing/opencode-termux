@@ -55,11 +55,13 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 | xcpquery | `0b9a4ac` | 33953149902 | 7 | ✅ PASSED |
 | dingtalk | `3f0932b` | 33954486202 | 12 | ✅ PASSED |
 | voice | — | — | — | 用户要求延后（契约已探明，见下） |
-| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 10 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`），CI 验证步已加入 workflow |
+| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 10 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`） + GitCode 真端点端到端 PASS；CI 验证步已加入 workflow |
 
 > **auth-login**：通用扫码登录框架（QR 生成→web UI 呈现→后台轮询→token 持久化→可配置活动执行器），
-> GitCode 为第一个接入站点（配置驱动，网页扫码端点待抓包确认）。见
-> `src/v2-plugin/auth-login/AGENTS.md`。
+> GitCode 为第一个接入站点，**微信小程序扫码三端点 + 签到/积分端点 + 成长中心 9 类任务触发端点
+> 已全部抓包实证**（`web-api.gitcode.com` + `__s=aihub` + `X-Source: toolbar_login`；
+> 每日Star/查看热门/分享/更新项目/关注CANN/下载模型文件/完善资料/README 等触发 body 见
+> `src/v2-plugin/auth-login/AGENTS.md` §2 任务实证）。
 
 ### v2 插件核心契约（实测硬结论）
 - `setup(ctx)` 里 `ctx.tool.transform(cb)` 的**回调在插件宿主 worker 运行（独立 global 作用域）**：回调内对外层闭包数组/变量的修改**在 setup 的 `await` 之后不可见**（探针 `sameGlobal:false` 证实）；回调内的副作用（写文件、`editor.list()`）**可见且含 host 全部内置工具**。
