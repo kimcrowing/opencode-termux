@@ -6,9 +6,11 @@
 
 ## 1. 仓库与分支
 - 主线构建分支 `dev`；**v2 插件迁移分支 `v2`**（本次工作都在这条上）。
-- push 远程名 `github`（直连 `https://github.com/kimcrowing/opencode-termux.git`；origin 是只读 gh-proxy URL，推不动）。
-- PAT 已带 `workflow` scope（换入 `.git/credentials`），改 `.github/workflows/*` 可直接 push。
-- 取 token：`TOKEN=$(sed 's/^.*:\([^:]*\)@github.com$/\1/' .git/credentials)`
+- **push 环境（2026-09-07 实测更正）**：远程**只有 `origin`**（直连 `https://github.com/kimcrowing/opencode-termux.git`，
+  fetch/push 同一 URL），**无 `github` 远程**；PAT 在 `~/.git-credentials`（`credential.helper=store`），
+  **不在** `.git/credentials` 也没有 `git remote add github`（历史版本曾用 gh-proxy origin + github 直连远程，已废弃）。
+- 提取 token：`TOKEN=$(sed -n 's#^https://[^:]*:\([^@]*\)@github.com$#\1#p' ~/.git-credentials)`；PAT 带 `workflow` scope，
+  改 `.github/workflows/*` 可直接 push。
 
 ## 2. CI 工作流
 - workflow id `350638463`（`v2-from-source.yml`）；dispatch：
@@ -55,7 +57,7 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 | xcpquery | `0b9a4ac` | 33953149902 | 7 | ✅ PASSED |
 | dingtalk | `3f0932b` | 33954486202 | 12 | ✅ PASSED |
 | voice | — | — | — | 用户要求延后（契约已探明，见下） |
-| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 10 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`） + GitCode 真端点端到端 PASS；CI 验证步已加入 workflow |
+| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 11 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`） + GitCode 真端点端到端 PASS；CI 验证步已加入 workflow |
 
 > **auth-login**：通用扫码登录框架（QR 生成→web UI 呈现→后台轮询→token 持久化→可配置活动执行器），
 > GitCode 为第一个接入站点，**微信小程序扫码三端点 + 签到/积分端点 + 成长中心 9 类任务触发端点

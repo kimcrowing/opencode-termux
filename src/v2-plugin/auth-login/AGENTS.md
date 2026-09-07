@@ -13,13 +13,23 @@
     在线解码器（api.qrserver.com/read-qr-code）精确还原原文 → 二维码真实可扫描。
   - `png.js`：零依赖 PNG 编码（手写 zlib stored blocks）。
   - `provider-qr.mjs`：把文本渲染成 `storage/<site>/qr-*.png` + ASCII。
-  - `core.mjs`：扫码登录状态机 + 后台轮询 + token 持久化（`storage/<site>.json`，参照 uyanip session.json 模式）
-    + 活动执行器。
+  - `core.mjs`：扫码登录状态机 + 后台轮询 + token 持久化
+    （**账号池**：`storage/<site>/accounts/<user>.json`，每账户一文件，参照 uyanip session.json 模式；
+    旧版单文件 `storage/<site>.json` 首次访问自动迁移）+ 活动执行器。
 - **站点适配器**：`providers/<site>.mjs`（目前 gitcode / mock）。每个适配器实现 `generateQr()/pollStatus()/
   headers()/manualToken()` 等（文本二维码也可用 `loginUrl()`）；接入新网站 = 新建一个 provider 文件 +
   在 opencode.json 的 `options.sites` 配一个条目，**框架代码零改动**。
-- **工具清单（10 个，namespace `auth_login`）**：sites / login / status / token / refresh / logout /
-  run_activities / manual_token / render_qr / qr_image_path。
+- **工具清单（11 个，namespace `auth_login`）**：sites / login / accounts / status / token / refresh /
+  logout / run_activities / manual_token / render_qr / qr_image_path。
+- **账号池（多账户/站 + 两种扫码场景，用户需求驱动）**：
+  - `auth_login_login` 参数 `mode`：`add`（默认）= **扫码添加**账户（临时槽 `_new_<ts>` 扫码，确认后以
+    `user.username` 落盘入池，如 `accounts/kimcrowing.json`）；`update` = **扫码更新**指定 `account`
+    （重新扫码覆盖其 token 续期，不新增账户；已登录也强制重新出码）。
+  - 账号池操作：`accounts`（列池）、`status`/`token`/`refresh`/`logout` 带可选 `account`（缺省=池首个或全站）、
+    `manual_token` 可指定目标账户（缺省池首个），`run_activities` 带可选 `account`（缺省**遍历全部账户**）。
+  - 内存 key = `siteId::accountId`；add 确认后从临时 key 迁移到 `siteId::username` 并删旧文件。
+  - 迁移兼容：旧 `storage/<site>.json` 首次 `accountIds()` 时自动迁为 `accounts/<username|default>.json` 并删旧文件。
+  - 活动执行带 20s 单活动超时保护（Promise.race），单活动挂死不拖跨整批/整池。
 - **二维码在 web UI 呈现的机制（实测确认）**：工具返回 ASCII（任何 UI 直接显示）+ PNG 文件路径；
   agent 用 `read` 工具读 PNG，tool-result 图片会在 opencode 会话中渲染。`auth_login_qr_image_path`
   专门返回路径供 agent read。
@@ -82,18 +92,22 @@
     任务列表：`GET /uc/api/v1/task?page=1&per_page=50&type=0|1`；当日统计：
     `GET /uc/api/v1/task/unclaimed/tips_pc`、`/task/total-unclaimed-rewards`、`/score/will_expire`。
   - **1小时内结算**：cann-star(104)/访问CANN(96)/模型任务等 completed 后需约 1h 才 status=0 可领。
-- 登录态持久化：`storage/gitcode.json`（格式 `{token,cookies,headers,user,savedAt}`，已被 .gitignore
-  忽略，禁止提交）；本机已注入抓包实测登录态（username=kimcrowing，access_token JWT 次日过期）。
+- 登录态持久化：`storage/gitcode/accounts/kimcrowing.json`（账号池格式 `{token,cookies,headers,user,savedAt}`，
+  已由旧版 `storage/gitcode.json` 自动迁移；目录已被 .gitignore 忽略，禁止提交）；
+  本机已注入抓包实测登录态（username=kimcrowing，access_token JWT 次日过期）。
 - **鉴权头**：Bearer + app headers（见上），不是 `api.gitcode.com/api/v5`（那是 REST 旧域，登录活动走 web-api）。
 
 ## 3. 验证（CI + 本机）
 
 - CI：`verify.sh`（通用，已加入 auth-login 为第 4 个 shipped 插件）+ `verify-auth-login.sh`（专项，
-  断言 10 个 `auth_login_*` 工具 ID；端口 `41847`，sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
+  断言 11 个 `auth_login_*` 工具 ID；端口 `41847`，sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
 - 本机冒烟：`tmp/opencode/auth_smoke2.sh`（用 `~/opencode2/bin/opencode2` + tagfix LD_PRELOAD）——
-  **已实测 PASS**：插件 `status:active`、无非 active 插件、10 个工具 ID 齐全。
+  **已实测 PASS**：插件 `status:active`、无非 active 插件、11 个工具 ID 齐全。
 - 框架端到端（node 直测，无需 opencode）：`tmp/opencode/auth_test.mjs`（mock provider：生成二维码→
   轮询确认→拿 token→跑活动→持久化→logout）——**已实测 PASS**，且 mock 二维码 PNG 可被在线解码还原。
+- **账号池端到端（2026-09-07 新增，`tmp/opencode/auth_pool_test.mjs`）——已实测 PASS**：mock provider 验证
+  add×2 入池（user-1/user-2）→ update user-1 续期（token 变、不新增）→ run_activities 全池/单账户 →
+  getStatus 全池/单账户 → logout 单账户/全清 → manual_token 注入 → 旧版单文件迁移。
 - GitCode 真端点端到端（2026-09-07，全部 PASS）：`gc_plugin_test.mjs`（manualToken 解码 user=kimcrowing +
   signIn 返回 400"今日已签到" + claimAll 无待领）、`gc_qr_test2.mjs`（generateQr 生成合法 PNG 小程序码 +
   pollStatus=WAITING）、`gc_core_e2e.mjs`（core.startLogin 直供 PNG 落盘 + runActivities 逐项 ok + logout）。
