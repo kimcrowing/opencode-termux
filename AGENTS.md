@@ -57,7 +57,7 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
 | xcpquery | `0b9a4ac` | 33953149902 | 7 | ✅ PASSED |
 | dingtalk | `3f0932b` | 33954486202 | 12 | ✅ PASSED |
 | voice | — | — | — | 用户要求延后（契约已探明，见下） |
-| **auth-login**（新增 v2 插件，非迁移） | 待 CI | 待 CI | 12 | 🛠 本机冒烟 PASS（`auth_smoke2.sh`） + GitCode 真端点端到端 PASS；CI 验证步已加入 workflow |
+| **auth-login**（新增 v2 插件，非迁移） | `8663ac7` | 34077756280 | 12 | ✅ PASSED（verify 断言 12 工具 ID）+ 本机冒烟 + GitCode 真端点端到端；已部署本机 opencode.json 每日自动调度并实测生效（daily-meta 落盘）|
 
 > **auth-login**：通用扫码登录框架（QR 生成→web UI 呈现→后台轮询→token 持久化→可配置活动执行器），
 > GitCode 为第一个接入站点，**微信小程序扫码三端点 + 签到/积分端点 + 成长中心 9 类任务触发端点

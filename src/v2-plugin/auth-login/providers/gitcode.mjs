@@ -356,25 +356,51 @@ export default {
 
   // 每日更新项目：往用户自己仓库 push 一个 commit（实证 commits API，encoding=base64 必填）。
   // def.repo 默认 kimcrowing/xcpquery（用户授权）；file 默认 docs/update-log.md（append 模式内容可配）。
+  // 【坑（2026-09-07 部署实测）】action:create 在文件已存在时报错 → probe 探测 + create/update fallback：
+  //   文件存在 → update（内容每次带新日期 → 总能产生新 commit）；不存在/update 404 → create；create 报已存在 → update。
   async updateProject(s, def) {
     const repo = String(def.repo || "kimcrowing/xcpquery").replace("/", "%2F");
     const filePath = String(def.file || "docs/update-log.md");
+    const branch = String(def.branch || "main");
     const date = new Date().toISOString().slice(0, 10);
     const content = String(def.content || `# Update Log\n- ${date}: daily auto maintenance\n`);
-    const body = {
-      branch: String(def.branch || "main"),
-      commit_message: `docs: daily auto-update ${date}`,
-      author_name: (s.user && s.user.username) || "kimcrowing",
-      author_email: String(def.email || "kim_mail@petalmail.com"),
-      actions: [{ action: "create", file_path: filePath, content: Buffer.from(content).toString("base64"), encoding: "base64" }],
+
+    const doPush = async (action) => {
+      const body = {
+        branch,
+        commit_message: `docs: daily auto-update ${date}`,
+        author_name: (s.user && s.user.username) || "kimcrowing",
+        author_email: String(def.email || "kim_mail@petalmail.com"),
+        actions: [{ action, file_path: filePath, content: Buffer.from(content).toString("base64"), encoding: "base64" }],
+      };
+      const res = await fetch(`${API}/api/v2/projects/${repo}/repository/commits?__s=aihub`, {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, this.headers(s.token)),
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      return { action, res, text, status: res.status, ok: res.ok, message: parseBody(text) || text.slice(0, 100) };
     };
-    const res = await fetch(`${API}/api/v2/projects/${repo}/repository/commits?__s=aihub`, {
-      method: "POST",
-      headers: Object.assign({ "Content-Type": "application/json" }, this.headers(s.token)),
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    return { status: res.status, ok: res.ok, message: parseBody(text) || text.slice(0, 100) };
+
+    // probe：文件是否存在（GitLab 风格）
+    let exists = false;
+    try {
+      const probe = await fetch(
+        `${API}/api/v2/projects/${repo}/repository/files/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(branch)}&__s=aihub`,
+        { headers: this.headers(s.token) }
+      );
+      exists = probe.ok;
+    } catch {}
+
+    let r = await doPush(exists ? "update" : "create");
+    if (!r.ok) {
+      // fallback：create 报已存在 → update；update 报不存在 → create
+      const fb = r.action === "create" ? "update" : "create";
+      const r2 = await doPush(fb);
+      if (r2.ok) return { ...r2, fallbackFrom: r.action };
+      return { ...r2, fallbackFrom: r.action, firstError: r.message };
+    }
+    return r;
   },
 
   // 关注 CANN 社区（一次性 +200，自动发放）：POST /uc/api/v1/follow（关注后无需领取）。

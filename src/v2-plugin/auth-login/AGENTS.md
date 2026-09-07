@@ -106,6 +106,12 @@
   - `daily_update`（每日更新项目）：`POST /api/v2/projects/{ns}/repository/commits`（GitLab 风格），
     body 必须带 **`author_name` + `author_email` + `actions[].encoding:"base64"`（content 为 base64）**，
     否则报「username参数错误」/「actions.encoding: param is missing」。push 后 compile 立即记录。
+    **坑（2026-09-07 部署实测，已修复）**：`action:"create"` 在文件已存在时报错（每日第二次起必挂，
+    实测当天调度器 daily_update 静默失败、xcpquery 无新 commit）。已改为 probe
+    `GET /api/v2/projects/{ns}/repository/files/{path}?ref=` 判断 + **create/update 双重 fallback**：
+    create 报已存在→update（内容每次带新日期→总能产生新 commit），update 报不存在→create。
+    注意：GitCode 该文件探接口实测**探不到**（probe 返回非 200 → 误判不存在先 create 再 fallback，
+    依赖 fallback 兜底，probe 只是减少一次失败请求）；修复后实测 update 成功（commit `6dbd7d8b`）。
   - `cann_follow`：`POST /uc/api/v1/follow` body `{"followedUsername":"cann","followType":1}` → +200 自动发放。
   - `cann_star`：同 daily_star（repoId=10708627）→ +50 自动发放。
   - `download_ai_file`：模型文件行点 resolve 下载 → `POST /api/v1/report?event_id=aihub_model_page_file_download`
@@ -126,9 +132,9 @@
 ## 3. 验证（CI + 本机）
 
 - CI：`verify.sh`（通用，已加入 auth-login 为第 4 个 shipped 插件）+ `verify-auth-login.sh`（专项，
-  断言 11 个 `auth_login_*` 工具 ID；端口 `41847`，sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
+  断言 12 个 `auth_login_*` 工具 ID（含 `auth_login_daily`）；端口 `41847`，sentinel env `AUTH_LOGIN_VERIFY_SENTINEL`）。
 - 本机冒烟：`tmp/opencode/auth_smoke2.sh`（用 `~/opencode2/bin/opencode2` + tagfix LD_PRELOAD）——
-  **已实测 PASS**：插件 `status:active`、无非 active 插件、11 个工具 ID 齐全。
+  **已实测 PASS**：插件 `status:active`、无非 active 插件、12 个工具 ID 齐全。
 - 框架端到端（node 直测，无需 opencode）：`tmp/opencode/auth_test.mjs`（mock provider：生成二维码→
   轮询确认→拿 token→跑活动→持久化→logout）——**已实测 PASS**，且 mock 二维码 PNG 可被在线解码还原。
 - **账号池端到端（2026-09-07 新增，`tmp/opencode/auth_pool_test.mjs`）——已实测 PASS**：mock provider 验证
