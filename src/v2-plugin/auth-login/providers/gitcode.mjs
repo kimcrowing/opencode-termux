@@ -370,7 +370,11 @@ export default {
         branch,
         commit_message: `docs: daily auto-update ${date}`,
         author_name: (s.user && s.user.username) || "kimcrowing",
-        author_email: String(def.email || "kim_mail@petalmail.com"),
+        // author_email 优先级：账号文件 user.email（每账号自己的绑定邮箱）> 活动 def.email > 默认 kimcrowing 的邮箱。
+        // 【坑（2026-09-07 实测）】GitCode commits API 校验 author_email 必须等于当前账号已绑定邮箱：
+        //   用别的邮箱一律 400 「email参数错误」（test@test.com/空/petalmail 猜测全被拒）。
+        //   新扫码账号（如 gcw_TojUaPz9）无绑定邮箱时该任务无法完成，需先网页绑定邮箱再在账号文件 user.email 填值。
+        author_email: String(((s.user && s.user.email) || def.email) || "kim_mail@petalmail.com"),
         actions: [{ action, file_path: filePath, content: Buffer.from(content).toString("base64"), encoding: "base64" }],
       };
       const res = await fetch(`${API}/api/v2/projects/${repo}/repository/commits?__s=aihub`, {

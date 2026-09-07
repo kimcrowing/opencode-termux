@@ -116,6 +116,22 @@
     create 报已存在→update（内容每次带新日期→总能产生新 commit），update 报不存在→create。
     注意：GitCode 该文件探接口实测**探不到**（probe 返回非 200 → 误判不存在先 create 再 fallback，
     依赖 fallback 兜底，probe 只是减少一次失败请求）；修复后实测 update 成功（commit `6dbd7d8b`）。
+  - **★ author_email 校验规则（2026-09-07 多账号实测更正，勿再猜）**：GitCode commits API 校验
+    `author_email` **必须等于当前登录账号已绑定的邮箱**——用其他任何合法邮箱（`test@test.com`、空串、
+    `gcw_TojUaPz9@petalmail.com` 等全试过）一律 400 `error_code:1001 "email参数错误"`。
+    kimcrowing 成功 commit 的 email=`kim_mail@petalmail.com`（其绑定邮箱）；微信小程序新扫码账号
+    （如 `gcw_TojUaPz9`）**默认无绑定邮箱** → daily_update 必然 400，需先网页绑定邮箱。
+    provider `updateProject` 的 email 优先级：**账号文件 `user.email` > 活动 `def.email` > 默认
+    `kim_mail@petalmail.com`**；每个账号在自己的 `storage/<site>/accounts/<user>.json` 加 `user.email`
+    字段即可（框架容忍 user 扩展字段）。绑定邮箱后可顺手领「添加电子邮箱」任务积分。
+  - **创建仓库端点（实测）**：`POST /api/v2/projects?__s=aihub`，body `{"name","path","visibility":"private",
+    "description"}`（GitLab 风格）→ 200 返回 project（id/name_with_namespace）。给新账号建仓后 daily_update
+    目标用 `"{username}/<repo>"` 模板（opencode.json 里 repo 已改为 `{username}/xcpquery`，provider 替换
+    username 后 `/`→`%2F`）。
+  - **任务结算时序实测（新账号）**：commit push 后**立即结算**（compile_time=push 时刻，无需等 1h），
+    「每日更新项目1次/更新你的项目/添加新建项目文件」status 变 0 可领；同一天同内容 update 不产生新 commit
+    （内容按天递增，跨天自然有新 diff）。每日任务积分领过返回 1002「已超过可领取次数」= 当天次数已用完，
+    属正常幂等。
   - `cann_follow`：`POST /uc/api/v1/follow` body `{"followedUsername":"cann","followType":1}` → +200 自动发放。
   - `cann_star`：同 daily_star（repoId=10708627）→ +50 自动发放。
   - `download_ai_file`：模型文件行点 resolve 下载 → `POST /api/v1/report?event_id=aihub_model_page_file_download`
