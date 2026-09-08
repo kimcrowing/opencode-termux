@@ -149,6 +149,50 @@
     任务列表：`GET /uc/api/v1/task?page=1&per_page=50&type=0|1`；当日统计：
     `GET /uc/api/v1/task/unclaimed/tips_pc`、`/task/total-unclaimed-rewards`、`/score/will_expire`。
   - **1小时内结算**：cann-star(104)/访问CANN(96)/模型任务等 completed 后需约 1h 才 status=0 可领。
+  - **★ user.email 被 refresh 冲掉（2026-09-08 实测修复，commit 8f0b75f）**：`refresh()` 重建 user 对象
+    `{username: payload.sub, payload}`（**不含自定义 email**）；core 的 ensureDaily 刷新后
+    `saveSession({token,cookies,headers,user,savedAt})` 全量覆盖账号文件 → 昨夜写入的 `user.email`
+    今晨 refresh 后被冲掉（文件只剩 username/payload）→ 当日 daily_update 报 400 `email参数错误`。
+    修复：provider refresh 返回的 user 沿用旧值 `email: (s.user && s.user.email) || ""`。
+    **教训**：任何会重构 user 对象并落盘的路径都要保留扩展字段（user 是框架容忍的扩展承载位）；
+    daily_update 前若怀疑 email 丢失，先查账号文件 `user.email`。
+  - **行为上报端点（2026-09-08 实证）**：`POST /api/v1/report?event_id=<event>`（body 任意 JSON、query
+    带 `__s=aihub`）是 GitCode 行为埋点统一入口——`daily_view`(PC_PageClick)、`daily_invite`(page_click)、
+    `download_ai_file`(aihub_model_page_file_download) 都走它。`download_ai_file` 上报后**即时结算**
+    （任务 85 status=0，立即能领，无需等 1h）。bundle 里封装见
+    `chunks/*.js` 的 `baseService.request({url:"/api/v1/report",...})`；event_id 为调用点字符串常量，
+    压缩代码不可直接枚举，需从页面 JS 行为或抓包获取。
+  - **新账号任务补齐实操（2026-09-08 全实测，gcw_TojUaPz9）**：
+    - cann_star(104) → `{"star_count":20}`；cann_follow(94) → 200（自动发放 50/200）。
+    - 任务 18「README 介绍」：给仓库 commit 一个 README.md → **即时结算**（无需个人主页操作）。
+    - 任务 25「启用个人README」：enable_readme（readme_repo/readme_file_path/readme_branch/readme_switch）→ 即时结算。
+    - 任务 6「创建开源项目」：**建仓时 `visibility:"public"` 才有效**（POST 建仓参数实证生效；
+      PUT /api/v2/projects/{id} 更新 visibility **无效**——补全必填字段 PUT 后 GET 仍 private）；
+      `license_template:"mit"` 参数被接受但 **LICENSE 文件不会自动生成**（repository/tree 只有 README.md，
+      license 元数据 None）→ 需手动 commits API 补 LICENSE；即使补了 LICENSE，任务 6 仍 status=2（待复查，
+      可能要求建仓时初始化 LICENSE 或 1h 结算）。
+    - **commits API 一次只支持单个 action**：`actions:[{create LICENSE},{create README}]` 两个 → 400
+      `PARAMETER_ERROR 参数错误`；分开单 action 各自成功。
+    - 分支名：xcpquery 默认 `main`（建仓历史默认），autobot-tools 新建默认 `master`——commit 前先查
+      repository/tree 或 GET project 的 default_branch。
+    - 任务 15/70（完善资料/个性化设置）：save 接口顶层 `nickname` 会真实生效（Lit→Lit-bot），但
+      `update_count` 只统计 profile 内字段（只改 nickname 时 0 也属正常）；**未即时结算**——guide 要求
+      「昵称+简介+头像」，缺头像可能不结算（头像上传端点未定位），也可能同属 1h 延迟结算。
+    - 任务 16「创建访问令牌」：`/api/v2/personal_access_tokens`、`/api/v2/user/*` 全部 404；真实创建页在
+      aihub 端 `/dashboard/token-classic/create`（未登录抓不到创建 API，待补）。
+  - **aihub（ai.gitcode.com）登录态（2026-09-08 实测）**：与 gitcode.com 前端**不同鉴权体系**——aihub 把
+    token 存 **localStorage**（key: access_token/refresh_token/userInfo），登录成功经
+    `window.parent.postMessage({access_token, refresh_token})` 回调写入；模型页打开时若 localStorage 校验
+    不过会被**清空**（EMPTY）。**无头浏览器注入 localStorage 后 reload 无效、模拟 postMessage 也无效**——
+    需要真实登录流转（扫码/账号密码）。因此依赖 aihub 登录的任务（84 模型体验/86 Space/87 Notebook/
+    105 CANN 课程）暂不可自动完成；gitcode.com 端的行为任务（2/3/4/96 等）用**无头 chromium + Cookie
+    access_token** 打开目标页面可触发前端上报（CDP 流程见全局 AGENTS §2b，execute/sync 脚本**必须显式
+    `return`**，无 return 表达式全返回 None）。
+  - **行为类任务触发实测（2026-09-08）**：archive 下载 `GET https://gitcode.com/{ns}/-/archive/{branch}.zip`
+    （带 Cookie access_token）→ HTTP 200（任务 4 下载项目触发）；打开 blob 页 `/{ns}/-/blob/{branch}/xxx.md`
+    → 200（任务 3 查看代码）；`/?p=seo` 搜索页提交关键词 → SSR 页面（任务 2）。**结算需 1h**（与 96 一致，
+    复查方式：1h 后查 uncompleted status==0）。
+  - **任务 85 下载模型文件（2026-09-08）**：仅 report 上报（不 GET raw 文件）也即时结算 status=0。
 - 登录态持久化：`storage/gitcode/accounts/kimcrowing.json`（账号池格式 `{token,cookies,headers,user,savedAt}`，
   已由旧版 `storage/gitcode.json` 自动迁移；目录已被 .gitignore 忽略，禁止提交）；
   本机已注入抓包实测登录态（username=kimcrowing，access_token JWT 次日过期）。
