@@ -265,7 +265,11 @@ export default {
       refreshToken: newRefresh,
       cookies: { access_token: token, refresh_token: newRefresh },
       headers: this.headers(token),
-      user: payload ? { username: payload.sub, payload } : (s.user || null),
+      // 【坑（2026-09-08 实测修复）】refresh 会重建 user 对象——必须沿用旧 user.email，
+      //   否则账号文件里登记的历史 email（用于 daily_update 的 author_email 校验）会被冲掉，
+      //   导致次日 daily_update 报 400「email参数错误」（实测：昨晚写入 user.email，
+      //   今晨 refresh 后文件 user 只剩 username/payload → daily_update 400）。
+      user: payload ? { username: payload.sub, payload, email: (s.user && s.user.email) || "" } : (s.user || null),
     };
   },
 
