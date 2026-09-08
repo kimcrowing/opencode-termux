@@ -216,6 +216,20 @@ class DingTalkAPI {
     const outTrackId = "card_" + Date.now() + "_" + Math.random().toString(16).slice(2, 10);
     const pickTrackId = (result) =>
       (result && result.result && (result.result.outTrackId || result.result.out_track_id)) || outTrackId;
+    // 钉钉 createAndDeliver 业务失败（如 spaceId illegal）时 HTTP 仍为 200，
+    // 必须检查 body.success 与 result.deliverResults[].success，否则卡片静默投递失败。
+    const assertOk = (result, tag) => {
+      const dr = (result && result.result && Array.isArray(result.result.deliverResults)) ? result.result.deliverResults : [];
+      const bad = dr.filter((d) => !d || d.success === false);
+      fileLog(
+        "createThinkingCard " + tag + " resp=" +
+        JSON.stringify(result).slice(0, 300) + " deliverBad=" + JSON.stringify(bad.map((d) => ({ spaceType: d.spaceType, errorMsg: d.errorMsg })))
+      );
+      if ((result && result.success === false) || bad.length) {
+        throw new Error("card deliver failed: " + JSON.stringify(bad.length ? bad : result).slice(0, 200));
+      }
+      return result;
+    };
     if (conversationType === "2") {
       const result = await this._post(
         API_BASE + "/v1.0/card/instances/createAndDeliver",
@@ -233,7 +247,7 @@ class DingTalkAPI {
         },
         token
       );
-      return pickTrackId(result);
+      return pickTrackId(assertOk(result, "IM_GROUP"));
     }
     if (userId) {
       const result = await this._post(
@@ -250,18 +264,18 @@ class DingTalkAPI {
             searchSupport: { searchIcon: "", searchDesc: "AI 回复" },
           },
           imRobotOpenDeliverModel: { spaceType: "IM_ROBOT", robotCode: this.robotCode },
-          openSpaceId: "dtv1.card//im_robot." + userId,
+          openSpaceId: "dtv1.card//IM_ROBOT." + userId,
           userIdType: 1,
         },
         token
       );
-      return pickTrackId(result);
+      return pickTrackId(assertOk(result, "IM_ROBOT"));
     }
     return "";
   }
 
   async finalizeCard(token, outTrackId, content, isError = false) {
-    await this._put(
+    const resp = await this._put(
       API_BASE + "/v1.0/card/streaming",
       {
         outTrackId,
@@ -274,6 +288,8 @@ class DingTalkAPI {
       },
       token
     );
+    fileLog("finalizeCard outTrackId=" + outTrackId + " len=" + (content ? content.length : 0) + " resp=" + JSON.stringify(resp).slice(0, 200));
+    return resp;
   }
 }
 
@@ -444,6 +460,7 @@ async function getOrCreateSession(state, dtConvId) {
   const { data, error } = await state.ctxClient.session.create({
     body: { title: "DingTalk " + (dtConvId || "default") },
     query: { directory: state.directory },
+    model: state.defaultModel ? parseModel(String(state.defaultModel)) : undefined,
   });
   if (error || !data) throw new Error("session.create failed: " + JSON.stringify(error));
   const entry = {
@@ -462,6 +479,7 @@ async function recreateSession(state, dtConvId) {
   const { data, error } = await state.ctxClient.session.create({
     body: { title: "DingTalk " + (dtConvId || "default") },
     query: { directory: state.directory },
+    model: state.defaultModel ? parseModel(String(state.defaultModel)) : undefined,
   });
   if (error || !data) throw new Error("recreate failed: " + JSON.stringify(error));
   const entry = {

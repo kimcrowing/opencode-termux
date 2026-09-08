@@ -190,6 +190,7 @@ type SessionBridge = {
   prompt: (args: { sessionID: string; text: string }) => Promise<any>;
   wait: (args: { sessionID: string }) => Promise<any>;
   context: (args: { sessionID: string }) => Promise<any>;
+  switchModel?: (args: { sessionID: string; model: { providerID: string; id: string } }) => Promise<any>;
 };
 
 // core.mjs 的 runPrompt/getOrCreateSession 需要一个带 session.create/prompt 的
@@ -198,9 +199,25 @@ type SessionBridge = {
 function makeSessionAdapter(session: SessionBridge) {
   return {
     session: {
-      create: async (args: { body?: { title?: string }; query?: { directory?: string } }) => {
+      create: async (args: { body?: { title?: string }; query?: { directory?: string }; model?: any }) => {
         try {
           const created = await session.create({ body: { title: args.body?.title || "dingtalk" } });
+          // 钉钉插件默认模型由 DINGTALK_DEFAULT_MODEL 决定；创建后立即 switchModel，
+          // 否则会落到 opencode.json 的全局默认模型（model 字段），绕开插件的 defaultModel 配置。
+          // core.mjs parseModel 返回 {providerID, modelID}（v1 形状），v2 switchModel 需 {providerID, id}
+          const w = args.model as { providerID?: string; modelID?: string; id?: string } | undefined;
+          const pid = w?.providerID;
+          const mid = w?.id || w?.modelID;
+          if (created && pid && mid && session.switchModel) {
+            try {
+              await session.switchModel({ sessionID: created.id, model: { providerID: pid, id: mid } });
+            } catch (e) {
+              fs.appendFileSync(
+                "/data/data/com.termux/files/home/.config/opencode/plugins/dingtalk/_debug.log",
+                new Date().toISOString() + " ADAPTER switchModel fail: " + JSON.stringify(e && (e as any).message) + "\n"
+              );
+            }
+          }
           return { data: created, error: null };
         } catch (e) {
           return { data: null, error: e };
@@ -217,6 +234,15 @@ function makeSessionAdapter(session: SessionBridge) {
           await session.wait({ sessionID: id });
           const ctx = await session.context({ sessionID: id });
           const messages = Array.isArray(ctx) ? ctx : ctx?.data ?? [];
+          // DEBUG：dump context 真实结构
+          try {
+            const shape = Array.isArray(ctx) ? "array" : typeof ctx + (ctx ? " keys=" + Object.keys(ctx).join(",") : "");
+            const sample = JSON.stringify(Array.isArray(ctx) ? messages[0] : ctx).slice(0, 400);
+            fs.appendFileSync(
+              "/data/data/com.termux/files/home/.config/opencode/plugins/dingtalk/_debug.log",
+              new Date().toISOString() + " ADAPTER context: shape=" + shape + " n=" + messages.length + " first=" + sample + "\n"
+            );
+          } catch (_) {}
           // 取最后一条 assistant 文本作为回复
           let out = "";
           for (let i = messages.length - 1; i >= 0; i--) {
@@ -226,8 +252,16 @@ function makeSessionAdapter(session: SessionBridge) {
               if (out) break;
             }
           }
+          fs.appendFileSync(
+            "/data/data/com.termux/files/home/.config/opencode/plugins/dingtalk/_debug.log",
+            new Date().toISOString() + " ADAPTER extract out len=" + out.length + " out=" + out.slice(0, 120) + "\n"
+          );
           return { data: { parts: [{ type: "text", text: out }] }, error: null };
         } catch (e) {
+          fs.appendFileSync(
+            "/data/data/com.termux/files/home/.config/opencode/plugins/dingtalk/_debug.log",
+            new Date().toISOString() + " ADAPTER prompt error: " + JSON.stringify(e && (e as any).message) + "\n"
+          );
           return { data: null, error: e };
         }
       },
@@ -236,6 +270,14 @@ function makeSessionAdapter(session: SessionBridge) {
 }
 
 function extractText(message: any): string {
+  // v2 消息正文在 content 数组：[{type:"text",text:"..."},{type:"reasoning",text:"..."}]
+  const content = message?.content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((p: any) => p && p.type === "text" && typeof p.text === "string")
+      .map((p: any) => p.text)
+      .join("\n");
+  }
   const parts = message?.parts ?? message?.payload?.parts;
   if (Array.isArray(parts)) {
     return parts
