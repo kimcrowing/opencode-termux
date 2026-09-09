@@ -273,7 +273,8 @@ export default {
   },
 
   // 活动执行器：
-  //   bean_sign            → signBeanAct 京豆签到（api.m.jd.com，实测接口存活，扫码后确认签名要求）
+  //   bean_sign            → scripts/jd/bean_sign.cjs PC 签到领京豆（pc_interact_sign_query/execute，
+  //                         动态 assignmentId，krh5st 5.3 签名；2026-09-09 实测 +2 豆到账）
   //   daily_collect_bean   → scripts/jd/jd_collect_bean.cjs 购物返豆领取（免签名，实测领 68 豆）
   //   daily_comment_bean   → scripts/jd/jd_comment_bean.cjs 评价领京豆（免签名，saveProductComment.action）
   //   query_user           → QueryJDUserInfo 用户信息/京豆余额（验证登录态）
@@ -282,7 +283,7 @@ export default {
     const type = String((def && def.type) || "");
     const cookies = (s && s.cookies) || {};
     if (type === "bean_sign" || type === "sign_bean" || type === "signin") {
-      return this.signBean(s);
+      return this.runScript(s, "bean_sign.cjs");
     }
     if (type === "query_user" || type === "user_info") {
       return this.queryUser(s);
@@ -312,13 +313,14 @@ export default {
     const env = Object.assign({}, process.env);
     delete env.LD_PRELOAD;
     delete env.LD_LIBRARY_PATH;
-    const r = spawnSync("node", [script, "--account", username], { encoding: "utf8", env, timeout: 180000, maxBuffer: 20 * 1024 * 1024 });
+    const r = spawnSync("node", [script, "--account", username], { encoding: "utf8", env, timeout: 300000, maxBuffer: 20 * 1024 * 1024 });
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     return { status: r.status, ok: r.status === 0, message: (out || "(无输出)").slice(-900) };
   },
 
-  // 京豆签到（M 端 signBeanAct）。appid=ld 客户端行为（2026-09-08 无 cookie 实测 402=活动高峰，
-  // 接口存活；扫码后如返回签名类错误（含 h5st/h5st 相关字段）则记录并提示走无头浏览器方案）。
+  // 京豆签到（M 端 signBeanAct）。⚠️ 2026-09-09 起已废弃：signBeanAct 接口已迁移（402 占位），
+  // executeActivity 的 bean_sign 已改为 runScript("bean_sign.cjs")（PC 签到领京豆链路）。
+  // 本方法仅留档（appid=ld 客户端行为；2026-09-08 无 cookie 实测 402=活动高峰）。
   async signBean(s) {
     const cookies = s.cookies || {};
     const uuid = "3acd1f6361f86fc0a1bc23971b2e7bbe6197afb6";

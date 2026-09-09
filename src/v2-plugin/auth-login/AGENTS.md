@@ -435,9 +435,39 @@ UA=Android 手机 UA（Redmi K40），Referer=购物返豆 H5 页。jsonp 包裹
 #### ★ 1714001 含义更正（2026-09-09 10:12 实测推翻旧表）
 **旧解释「1714001=活动时段外(00:00-10:00)」已证伪**：10:12（活动时段 10:00-21:00 **内**）实测
 `bff_rightsCenter_interaction` 仍返回 `1714001 请稍后再试~~`。1714001 =「过签名+过登录但业务层
-拒绝」，具体诱因可能是 **assignmentId 已换期失效**（AGENTS 早前标注「内置 assignmentId 若 10:00 后
-仍失败需动态获取」——现已触发）或今日已领/风控节流，**不是单纯时段**。待动态获取新 assignmentId
-（query 类接口）后再验证是否恢复 code:0。
+拒绝」，具体诱因是 **assignmentId 已换期失效**（AGENTS 早前标注「内置 assignmentId 若 10:00 后
+仍失败需动态获取」——已触发）或今日已领/风控节流，**不是单纯时段**。
+
+**★ 解决：PC 签到链路全打通（2026-09-09 11:33 端到端实测到账，替代失效的 H5 内置 assignmentId）**
+H5 `bff_rightsCenter_interaction` 的 assignmentId 换期无法内置，但 **PC 京豆中心「签到领京豆」卡片
+走独立接口，assignmentId 每次动态获取**（天然免疫换期）。**2026-09-09 实测签到成功 +2 京豆**
+（明细 `活动奖励京豆` 11:33:00 到账；11:39 重跑幂等识别「今日已签到」）。
+```
+1) 查询（GET  https://api.m.jd.com/?functionId=pc_interact_sign_query&body={"type":1}
+   +h5st/uuid/loginType=3/appid=asset-h5/client=pc/clientVersion=1.0.0/t/area）
+   → data.assignmentInfoList[] 中 type=5 & extraType="sign" 项：
+   id=<每日动态 assignmentId>、signDetail.itemId="1"、completionFlag=true=今日已签
+   resourceData.activityId=<活动id>、newUserGuideTask{id,completionFlag}
+2) 执行（POST 同 URL，functionId=pc_interact_sign_execute）
+   body={"type":5,"eaId":<assignmentId>,"itemId":"1","extraType":"sign"}
+   → {"success":true,"data":{"assignmentInfo":{"signList":["2026-09-09_1.0"],...},
+      "assignmentRewardInfo":{"jingDouRewards":[{"quantity":2,...}]}}}
+3) （可选）newUserGuideTask.completionFlag=false 时补 POST type=0&eaId=<引导id>（无奖励）
+```
+**⚠️ 两大坑（2026-09-09 实测，脚本已写死规避）**：
+- **方法绑定 functionId**：query **必须 GET**、execute **必须 POST**；串用返回
+  「互动中心内部访问出现错误」HTML 页（非 JSON）。
+- **execute 的 POST 绝不能带 `Content-Type: application/x-www-form-urlencoded`**——带上即被
+  api.m.jd.com 网关判非法返回同上 HTML 页；与页面一致只带 UA/Cookie/Referer。
+- 签名：krh5st(PC UA, {functionId, body, appid:'asset-h5', client:'pc', clientVersion:'1.0.0'})
+  → h5st 5.3；PC UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/120.0.0.0`。
+  uuid = cookie `__jda` 第 2 段（页面 Ap() 逻辑）；loginType=3；area=1_2802_54747_0。
+- **krh5st 首次进程初始化很慢（jsdom 4-5 分钟），有磁盘缓存后 ~12s**；插件 runScript
+  timeout 已调 300s。错误码映射（抓自 channel2022/jd_bean_sign/index-legacy-*.js）：
+  306=任务已经领取过 / 309=您还有未完成的任务哦 / 102/101/401=活动太火爆 / 100/3=-100=请先登录哦
+  （cookie 失效）。
+- 页面 JS 出处：`storage.360buyimg.com/channel2022/jd_bean_sign/index-legacy-BldL61M_.js`
+  （京豆中心主框架 `assets-fe/mybean/prod/.../index.*.js` 按需加载该频道 chunk）。
 
 #### 错误码对照（实测，2026-09-09 更新）
 | 返回 | 含义 |
@@ -452,8 +482,10 @@ UA=Android 手机 UA（Redmi K40），Referer=购物返豆 H5 页。jsonp 包裹
 
 #### 固化产物
 - **签到脚本**：`projects/opencode-termux/scripts/jd/bean_sign.cjs`（多账号从 auth-login 账号池读 thor cookie，
-  krh5st 5.3 签名 → bff_rightsCenter_interaction；`--skip-time-check` 可无视时段强制跑，默认 10:00-21:00 才执行；
-  退出码：0=成功/2=时段外/3=全失败）。⚠️ 当前 assignmentId 可能失效（1714001），待动态获取新值。
+  **PC 签到领京豆链路**：krh5st 5.3 签名 → GET pc_interact_sign_query 动态取 assignmentId →
+  POST pc_interact_sign_execute 签到；`--skip-time-check` 无视时段（默认 10:00-21:00）、已签到自动幂等跳过；
+  2026-09-09 实测 +2 豆到账、11:39 重跑幂等 ✅；退出码：0=成功/已签到，2=时段外，3=全部失败）。
+  ⚠️ H5 天天领豆（bff_rightsCenter_interaction/beanDailySign）assignmentId 换期失效，已弃用。
 - **购物返豆领取脚本**：`projects/opencode-termux/scripts/jd/jd_collect_bean.cjs`（全免签名链路
   manualCollectIndex → manualCollectBeans → 复查；2026-09-09 实测领 68 豆 ✅；`--account/--dry-run/--debug`）。
 - **评价领豆脚本**：`projects/opencode-termux/scripts/jd/jd_comment_bean.cjs`（全免签名链路
@@ -461,7 +493,9 @@ UA=Android 手机 UA（Redmi K40），Referer=购物返豆 H5 页。jsonp 包裹
   2026-09-09 实测 3/3 成功 + 明细「商品评价奖励京豆」到账 ✅）。
 - **插件每日调度（2026-09-09 接线）**：`providers/jd.mjs` `executeActivity` 新增
   `daily_collect_bean`（→ jd_collect_bean.cjs）/ `daily_comment_bean`（→ jd_comment_bean.cjs）分支，
-  用 `spawnSync("node", ...)` 且 **清 LD_PRELOAD/LD_LIBRARY_PATH**（termux tagfix 干扰 node）；
+  `bean_sign` 也改走脚本（→ bean_sign.cjs PC 签到；signBeanAct 直连 402 已废弃），
+  用 `spawnSync("node", ...)` 且 **清 LD_PRELOAD/LD_LIBRARY_PATH**（termux tagfix 干扰 node），
+  timeout 300s（krh5st 首次初始化慢）；
   opencode.json `options.sites.jd.activities` 现为 3 项（京豆签到/购物返豆领取/评价领京豆），
   auth-login 每日调度（10s 首跑 + 30min interval）自动执行。独立验证脚本：`tmp/opencode/jd_test_plugin_branch.mjs`。
 - **自动执行器**：`scripts/jd/jd_bean_sign_runner.sh`（循环等 10:00 后执行一次即退出，日志 `bean_sign.log`；
