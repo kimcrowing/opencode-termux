@@ -491,13 +491,27 @@ H5 `bff_rightsCenter_interaction` 的 assignmentId 换期无法内置，但 **PC
 - **评价领豆脚本**：`projects/opencode-termux/scripts/jd/jd_comment_bean.cjs`（全免签名链路
   GET 待评价列表 → GET orderVoucher 提取 productId → POST saveProductComment；`--account/--dry-run/--debug`；
   2026-09-09 实测 3/3 成功 + 明细「商品评价奖励京豆」到账 ✅）。
+- **晒单领豆脚本**：`projects/opencode-termux/scripts/jd/jd_photo_bean.cjs`（全免签名链路
+  GET club.jd.com/myJdcomments/myJdcomment.action?sort=1（待晒单列表）→ 正则提取 `imgContainer_<orderId>_<productId>` →
+  程序生成纯色 PNG（node zlib 手写编码，免外部图片）→ POST ajaxUploadImage.action（multipart: PHPSESSID+Filename，
+  响应=纯路径，拼 `//img30.360buyimg.com/shaidan/`+路径）→ POST saveShowOrder.action
+  `orderId/productId/imgs=<图片URL>/saveStatus=3`；`--account/--dry-run/--debug`；
+  2026-09-09 实测 5/5 单全部提交并移除待晒单 ✅。**判定**：submit 返回
+  `{"success":false,"resultCode":"24"}` 是**成功受理**（订单随即从列表移除，京豆审核后约一天到账）；
+  空 imgs 会真失败（列表不移除）。
 - **插件每日调度（2026-09-09 接线）**：`providers/jd.mjs` `executeActivity` 新增
-  `daily_collect_bean`（→ jd_collect_bean.cjs）/ `daily_comment_bean`（→ jd_comment_bean.cjs）分支，
+  `daily_collect_bean`（→ jd_collect_bean.cjs）/ `daily_comment_bean`（→ jd_comment_bean.cjs）/
+  `daily_photo_bean`（→ jd_photo_bean.cjs）分支，
   `bean_sign` 也改走脚本（→ bean_sign.cjs PC 签到；signBeanAct 直连 402 已废弃），
   用 `spawnSync("node", ...)` 且 **清 LD_PRELOAD/LD_LIBRARY_PATH**（termux tagfix 干扰 node），
   timeout 300s（krh5st 首次初始化慢）；
-  opencode.json `options.sites.jd.activities` 现为 3 项（京豆签到/购物返豆领取/评价领京豆），
+  opencode.json `options.sites.jd.activities` 现为 4 项（京豆签到/购物返豆领取/评价领京豆/晒单领京豆），
   auth-login 每日调度（10s 首跑 + 30min interval）自动执行。独立验证脚本：`tmp/opencode/jd_test_plugin_branch.mjs`。
+  ⚠️ **无头调试坑（2026-09-09 实测）**：club.jd.com sort=1 页面 chromedriver `/url` 会**等待页面 load 卡死**
+  （plupload/长轮询导致 load 事件迟迟不来）——必须 `pageLoadStrategy:'none'`（导航立即返回）；
+  且多次测试会堆积 20+ 残留 session 拖垮 chromedriver（DELETE 卡住），reset 方式：kill chromedriver 进程
+  后重启（残留 session 无法可靠清理）。页面内 execute/sync 在该页不稳（返回 null），改用
+  CDP `Runtime.evaluate`（`/goog/cdp/execute` + returnByValue:true）才稳定。
 - **自动执行器**：`scripts/jd/jd_bean_sign_runner.sh`（循环等 10:00 后执行一次即退出，日志 `bean_sign.log`；
   `nohup bash jd_bean_sign_runner.sh &` 启动）。
 - 运行依赖：jdpro 仓库 `tmp/opencode/jd-h5st/jdpro/function/`（krh5st + node_modules/ds + redis）。

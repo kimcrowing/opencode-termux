@@ -277,6 +277,8 @@ export default {
   //                         动态 assignmentId，krh5st 5.3 签名；2026-09-09 实测 +2 豆到账）
   //   daily_collect_bean   → scripts/jd/jd_collect_bean.cjs 购物返豆领取（免签名，实测领 68 豆）
   //   daily_comment_bean   → scripts/jd/jd_comment_bean.cjs 评价领京豆（免签名，saveProductComment.action）
+  //   daily_photo_bean     → scripts/jd/jd_photo_bean.cjs 晒单领京豆（免签名，saveShowOrder.action；
+  //                         2026-09-09 实测 5/5 单提交移除；resultCode 24=成功受理，京豆审核后到账）
   //   query_user           → QueryJDUserInfo 用户信息/京豆余额（验证登录态）
   //   其他 type            → 回退通用请求（def.method/path/body，Cookie 自动带上）
   async executeActivity(s, def) {
@@ -293,6 +295,9 @@ export default {
     }
     if (type === "daily_comment_bean" || type === "comment_bean") {
       return this.runScript(s, "jd_comment_bean.cjs");
+    }
+    if (type === "daily_photo_bean" || type === "photo_bean") {
+      return this.runScript(s, "jd_photo_bean.cjs");
     }
     // 通用 fallback
     const url = (def.baseUrl || "https://api.m.jd.com") + (def.path || "");
