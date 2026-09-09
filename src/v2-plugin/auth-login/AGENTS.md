@@ -278,3 +278,199 @@
   新手礼包（claim-gift 10001 幂等「已领取过」）——**3 账号全部 executed、0 skipped**。
 - **幂等**：不 force 再跑 → 3 账号全部「今日已完成」skip（daily-meta.json 落盘生效）。
 - 刷新后 credential 表同步验证：3 行 token 均换新（exp=now+60 天）、无重复行、18623190160 保持 active=1。
+## 6. 京东适配器（jd）实证（2026-09-08 PC 登录流；2026-09-09 签到链路全打通更正）
+
+> ⚠️ **2026-09-09 重大更正（实测推翻下方部分旧结论）**：
+> 下方「signBeanAct S109 软拒绝」「h5st 4.x」「路线未定」等结论**已被 2026-09-09 实测推翻**，
+> 以本节末尾「★ 天天领豆 2026 真实接口 + h5st 5.3（kr 模式）全打通」为准。
+> 旧 signBeanAct 接口**已迁移**（现返回 402「活动现在挤不进去呀」= 活动挪到别处，无 cookie 也 402）；
+> 2026 年天天领豆真实接口 = `bff_rightsCenter_interaction`（beanDailySign）；
+> 正确签名 = **h5st 5.3（kr 模式 krh5st，js_security_v3 + isvObfuscator tk06 token）**，4.x 已被拒（1711002）。
+
+### 登录流（PC 码，京东 App 可扫）——已端到端成功
+- 二维码：`qr.m.jd.com/show?appid=133&size=147&t=<ms>`（PNG 直接返回，京东 App 扫）；
+  轮询 `qr.m.jd.com/check` JSONP（201未扫/202已扫待确认/200→ticket/203过期）。
+- **★ step4 成功参数（绕风控 1100 的关键，勿再用旧参数）**：
+  `GET passport.jd.com/uc/qrCodeTicketValidation?t=<ticket>&ReturnUrl=https%3A%2F%2Fwww.jd.com%2F&callback=jsonp`
+  头：`Referer: https://union.jd.com/index`；`Cookie:` **只带 `wlfstk_smdl=<token>`**（不要带全量会话 cookie！）。
+  响应是 **JSONP**（`jsonp({...})`）；Set-Cookie 为 **PC 端 cookie（thor 体系，非 pt_key/pt_pin）**：
+  thor/pin=<用户名>/unick=<昵称>/light_key/flash/TrackID/logining=1/_pst/pinId/_tp/DeviceSeq 等。
+  ⚠️ **更正（2026-09-09 实测）**：thor 实际有效期**远短于 Cookie 头标注的 ~1 年**——09-08 22:33:07
+  成功保存的 thor（288 字符，含 thor/pin/unick 等 16 cookie）在 **09-09 09:00 已被服务端拒绝**
+  （signBeanAct 402「挤不进去」/petName 302/bean.jd.com 重定向登录页 = 三重印证无有效 cookie）。
+  实测寿命约 **10.5h**。京东无 refresh()，thor 失效只能重新扫码（update 模式）续期。
+- 旧参数（无 ReturnUrl/callback、Referer=passport.uc.login、带全量 cookie）→ **riskCode:1100**
+  （要求 aq.jd.com 安全验证）且零登录 cookie = 死路。已实测废弃。
+- ⚠️ **新事实（2026-09-09 实测，推翻"修复参数必成功"的隐含假设）**：09-09 用上述 step4 成功参数
+  重扫（update 模式续期），**仍返回 riskCode:1100**（lastError=`风控拦截 riskCode:1100`，url 指向
+  aq.jd.com 安全验证页）——参数正确不等于一定过风控。**真实无头 chromium 页面内扫码同样被 1100**
+  （页面跳转 aq.jd.com/certified/index...&resultCode=1100），排除了设备指纹/IP 因素。
+- ★ **1100 根因结论（2026-09-09 实测定性，勿再猜）**：连带真实浏览器都跳 aq.jd.com = **账号级安全标记**
+  （aq 页面原文「您的账号存在安全风险，暂无法在京东网页端使用。请使用该账号登录【京东商城 APP】
+  完成安全验证」）。node fetch 与 chromium 两次落地的风控参数 `p=6e758c4f2920ca0d` **完全一致** →
+  与设备指纹/IP/UA 无关，**只认账号**。触发时机：09-08 成功登录后到 09-09 之间被标记（可能因
+  多设备/自动化环境频繁登录）。**解除途径只有一条：用京东 APP 登录该账号完成安全验证**（网页端
+  无任何绕过手段）。验证解除后再试 PC 扫码。aq.jd.com 页面仅含隐藏 eid/fp 两个 input + 提示文案，
+  无滑块/短信通道可走。
+- ✅ **风控解除 + 新鲜 thor 落库（2026-09-09 端到端确认）**：用户在【京东商城 APP】完成安全验证后，
+  用真实浏览器（Windows Edge, 远程 IP 222.212.211.66）访问 www.jd.com 成功——请求头 cookie 含
+  **完整新鲜 thor 登录态**（thor 288 字符 + pin=loon520 + unick=Kimcrowing + flash/light_key/pinId/
+  logining/_pst/_tp/ceshi3.com 等 26 cookie）。已用 `auth_login_manual_token` 注入账号池
+  `storage/jd/accounts/loon520.json`（savedAt=2026-09-09 09:55:43）。
+  **验证（本机 node probe）**：petName 返回 HTTP 200 + 用户数据（头像 URL `6c6f6f6e...` =
+  uid「loon5201582330687253」hex 编码）✅ 服务端接受新 thor；bean.jd.com 返回正常 HTML ✅。
+  **注意**：manualToken 仅认 pt_pin 会把 user 解析成「jd」，需手动修正账号文件 user 字段
+  （`{username:"loon520", nick_name:"Kimcrowing"}`）。
+- **移动端流（plogin.m.jd.com/cgi-bin/m/tmauth）已废弃**：其二维码京东 App 扫码提示
+  「暂无可用打开方式」（openapp.jdmobile:// 深链打不开），只适合手机浏览器扫；PC 码才是 App 标准登录。
+- 登录态保存 = s.cookies 存**全量 PC cookie 字典**；user.username=`pin`、nick_name=`unick`；
+  cookieType=`pc_thor`。京东无 token 刷新 → 无 refresh()，失效靠重新扫码（update 模式）。
+
+### 【历史记录·已被 2026-09-09 实测推翻】signBeanAct S109「当前签到人数较多」= 旧结论，勿再参考
+- 旧结论（2026-09-08）：无 cookie → 402「活动现在挤不进去呀」；有 thor → code:0+S109，判断为「风控软拒绝」。
+- **推翻点**：2026-09-09 实测 **signBeanAct 已不是天天领豆的当前接口**（活动迁移，旧入口统一回 402
+  「挤不进去」占位，无 cookie 也 402）；当前接口 = `bff_rightsCenter_interaction`（见下节）。
+  当时「带签名 4.x 仍 S109」的观察实际是 h5st 4.x 不被接受 + 接口已迁移的混合效应。
+- 一条仍然成立：光有 cookie 不够，api.m.jd.com 需要有效 h5st（**5.3 版本**，4.x 必 1711002）。
+- 用户信息接口现状（未变）：`wq.jd.com/user/info/QueryJDUserInfo` 403 nginx（WAF 拦 thor）；
+  `passport.jd.com/.../getUserInfoForMiniJd.action` 302。均未通（不影响签到链路）。
+
+### ★ 天天领豆 2026 真实接口 + h5st 5.3（kr 模式）全打通（2026-09-09 端到端实测）
+**链路已全通**：krh5st 生成 h5st 5.3 → thor PC cookie → `bff_rightsCenter_interaction` → 业务层响应
+（真实返回 `1714001 请稍后再试`，签名/参数/登录全部被接受；**但 10:12 活动时段内实测仍 1714001**，
+判断内置 assignmentId `VdbAAQEQ4t6u7ZommctabgaobfW` 已换期失效，需动态获取新 assignmentId——
+见下节「PC 京豆接口+1714001 更正」）。
+
+#### 2026 年天天领豆标准请求（抓自 jd_signbeanact_.js 20260608 实际发包）
+```
+POST http://api.m.jd.com/client.action?functionId=bff_rightsCenter_interaction
+form: functionId=bff_rightsCenter_interaction
+      appid=signed_wh5
+      body={"scene":"commonDoInteractiveAssignment","activityCode":"beanDailySign",
+            "businessScenario":"jingDouCenter","commonScene":"secKillChannel",
+            "assignmentId":"VdbAAQEQ4t6u7ZommctabgaobfW"}
+      client=apple  clientVersion=11.1.2  t=<ms>  h5st=<5.3>
+```
+- 老 signBeanAct（appid=ld|signed_wh5_ihub）**已迁移废弃**：返回 402「活动现在挤不进去呀」（无 cookie 同）；
+  勿再作为目标接口。
+- **assignmentId 目前取脚本内置值**，10:00 后若失败需改为动态获取（query 类接口，待确认）。
+- UA 必须是京东 APP 完整 iOS UA（含 `ep=%7B%22ciphertype%22%3A5...` 加密指纹参数，抓自真实请求；普通
+  `JD4iPhone/...` UA 也能过签名层，但完整 UA 更不易风控）。
+- 请求头：Content-Type form-urlencoded + Referer `https://api.m.jd.com/`（缺 Referer 会 403
+  `cross-origin request from '' is not allowed`）；X-Requested-With/Accept-Language zh-cn 建议带全。
+
+#### ★ h5st 签名核心结论（推翻此前"4.x 可用"的一切记录）
+- **h5st 4.x（dylib/dyland/dylans 老算法）已不被 api.m.jd.com 接受**：`1711002 参数错误`。
+  全混淆脚本 jd_signbeanact_.js 20260608 用的就是 dylans 签名 → 必 1711002（不是脚本 bug，
+  是其内置签名器已过期）。
+- **h5st 5.3 且必须带正确 tk06 token 才被接受**：kr 模式 krh5st 直出 5.3（8-10 段结构）→
+  bff_rightsCenter_interaction 过签名层（落业务层 1714001，而非 1711002）。
+- **krh5st 用法（终极路线，无需逆向 47.js / ParamsSign 内部）**：
+  ```js
+  const H5 = require('<jdpro>/function/krh5st.js');  // 内含 jsdom + isvObfuscator 实时换 tk06 token
+  const h5st = await H5(UA, { functionId: 'bff_rightsCenter_interaction',
+                              body, appid: 'signed_wh5', client: 'apple', clientVersion: '11.1.2' });
+  ```
+  传入的 body/appid 必须与请求参数完全一致（bodySign 段绑定 body）。
+- krgetToken/krgetSign 不可用（参数语义未明、返回空），**不要再用**；krh5st 自带 token 获取。
+- kr 套件依赖：`function/node_modules/ds`（自建 mock）+ redis（`npm i redis`）——npm i 会清 mock，需重建。
+- h5source/47.js = 官方 ParamsSign 明文（webpack + obfuscator-vm 字节码），jsdom 可加载 `new ParamsSign({appId})`
+  备用；krgetH5st 的 domWindow getter 当前为 null，勿依赖。
+
+#### ★ PC 京豆中心接口**全部免 h5st 签名**（2026-09-09 无头浏览器抓包 + node 直测双重实证）
+**重大发现**：PC 端京豆体系接口无需 h5st——`api.m.jd.com/api?functionId=...&appid=asset-h5`（PC 京豆
+中心 bean.jd.com）与 `api.m.jd.com/client.action?functionId=...&appid=ld&client=wh5`（购物返豆 H5）
+**都不需要签名**，仅需有效 thor cookie。实测（node 直连，无 h5st）：
+- `BEAN_BALANCE` → `{"code":"0000","data":{"balance":444,...}}`（京豆余额）
+- `BEAN_EXPIRED_DETAILS` → 过期豆明细（expireDayNum 30）
+- `BEAN_DETAILS_NOCNT` → 收支明细（pageNo/pageSize/dataType 参数）
+- `BEAN_USER_COMMONT_ORDER` → 评价领豆统计
+- `SHOP_BEAN_GET_MANUAL_COLLECT_ORDER_LIST` → 10000 系统异常（参数问题非签名问题，勿用）
+- `manualCollectIndex` body=`{"rnClient":"1"}` → 待领取订单列表（orderList[].orderIdStr/
+  orderJpeasNum/collectStatus 0=可领/collectDeadline）
+- `getManualCollectOrderList` body=`{"type":0,"currentPage":-1,"orderDate":"","pageOffSet":"0"}`
+  → 领取历史
+- **`manualCollectBeans`（购物返豆领取）** body=`{"orderIdList":["<订单号>",...]}` → 领取成功
+  `{"code":"0","data":{"collectStatus":"1000"}}`
+
+#### ★★ 评价领京豆全链路打通（2026-09-09 端到端实测，免 h5st 全签名）
+**入口**：京豆中心「去评价 >」（5 个商品待评价 = `BEAN_USER_COMMONT_ORDER` 的 commentCount:5）→
+club.jd.com 评价中心 → 每个商品按「评价」进 `orderVoucher.action?ruleid=<订单号>`。
+
+**接口（PC club.jd.com，全部免 h5st，仅需 thor cookie）**：
+1. 待评价订单列表（服务端渲染 HTML，无 XHR）：`GET https://club.jd.com/myJdcomments/myJdcomment.action?sort=0`
+   → 正则提取全部 `orderVoucher.action?ruleid=<订单号>`。
+2. 单个订单评价页：`GET https://club.jd.com/myJdcomments/orderVoucher.action?ruleid=<订单号>`
+   → 提取 `orderId`（元素 `o-info-orderinfo` 的 `oId` 属性）+ `productId`（页面第一个 `item.jd.com/<pid>.html` 链接）。
+   ⚠️ 多商品订单页面只渲染**剩余未评商品**；`image-upload-(\d+)` 的 id 可能残留已评商品，**不可靠**，
+   以 item.jd.com 链接为准。
+3. **商品评价提交**：`POST https://club.jd.com/myJdcomments/saveProductComment.action`
+   （Content-Type form-urlencoded，X-Requested-With: XMLHttpRequest，Referer=orderVoucher 页）：
+   ```
+   orderId=<订单号>&productId=<SKU>&score=5&content=<双重urlencode>
+   &saveStatus=1&anonymousFlag=1
+   ```
+   - content **双重 urlencode**（submitService.js 里 `encodeURIComponent()` + jQuery 表单序列化；脚本里
+     手拼 body 时 `encodeURIComponent(encodeURIComponent(text))`，勿用 URLSearchParams 否则三重）
+   - 响应 `{"acc":"N","success":true,"resultCode":"1"}`（acc 每次提交 +1 = 服务端累计评价数）
+   - **无需先做服务调查（insertRestSurvey）/ 安装评价（saveInstallComment）**——直接 POST 商品评价即成功
+   - 星级：无图 saveStatus=1；匿名 anonymousFlag=1（页面默认勾选）
+4. **服务调查（可选，页面「发表」先行步骤）**：`POST /myJdcomments/insertRestSurvey.action?voteid=145&ruleid=<oid>`
+   body `oid/ gid/ sid/ tags/ ro1827=1827A1&ro1828=1828A1&ro1829=1829A1`（物流/配送/安装评分 1827-1829 各行）→
+   `{"status":1}`。纯脚本可跳过。
+
+**到账实测（2026-09-09）**：提交后 **1~12 分钟到账**（页面「京豆将于一天左右返到你的账户中」是保守文案）。
+细则见 `BEAN_DETAILS_NOCNT`：`商品评价(商品号:<sku>)奖励京豆` 逐条记录。
+当日 5 单全评（回力裤 3555458004465923 +10、红卫羊脂皂 3595458016191925 +10、四神汤 3595458016189989 +10、
+海尔热水器 3581458011664304 +20、十月稻田 3575458002035437），4 单确认到账共 +50 豆；余额 444→509。
+**BEAN_USER_COMMONT_ORDER 的 commentCount 归零后列表页不再出现**（`待评价订单: (无)`）。
+
+**购物返豆领取全链路固化**（`projects/opencode-termux/scripts/jd/jd_collect_bean.cjs`）：
+查 manualCollectIndex → 筛 collectStatus=0 → manualCollectBeans 批量领取 → 复查余额。
+**2026-09-09 端到端实测**：浏览器点击「领取全部京豆」领 63+5=68 豆（余额 376→444），
+node 直测 manualCollectBeans 返回 code 0 + collectStatus 1000 免签名 ✅。
+请求参数：`client.action?functionId=X&body=<urlencoded JSON>&appid=ld&clientVersion=1.0.0&client=wh5&jsonp=cb<ts>&uuid=<cookie __jdu>&area=1_2802_54747_0`；
+UA=Android 手机 UA（Redmi K40），Referer=购物返豆 H5 页。jsonp 包裹需剥壳解析。
+
+#### ★ 1714001 含义更正（2026-09-09 10:12 实测推翻旧表）
+**旧解释「1714001=活动时段外(00:00-10:00)」已证伪**：10:12（活动时段 10:00-21:00 **内**）实测
+`bff_rightsCenter_interaction` 仍返回 `1714001 请稍后再试~~`。1714001 =「过签名+过登录但业务层
+拒绝」，具体诱因可能是 **assignmentId 已换期失效**（AGENTS 早前标注「内置 assignmentId 若 10:00 后
+仍失败需动态获取」——现已触发）或今日已领/风控节流，**不是单纯时段**。待动态获取新 assignmentId
+（query 类接口）后再验证是否恢复 code:0。
+
+#### 错误码对照（实测，2026-09-09 更新）
+| 返回 | 含义 |
+|---|---|
+| `1711002 参数错误` | h5st 4.x 或参数集与签名不一致（签名层拒） |
+| `1714001 请稍后再试` | ✔ 过签名+过登录，**业务层拒绝**（assignmentId 失效/已领/节流——**非单纯时段外**，2026-09-09 10:12 时段内实测仍返回） |
+| `402 活动现在挤不进去呀` | signBeanAct 旧接口迁移占位（无 cookie 相同） |
+| `403 cross-origin` | 缺 Referer 头 |
+| `code:1 no access` | appid 不对（如 wh5 尝试 signBeanAct） |
+| `code:2 does not exist` | functionId 不存在 |
+| `code:0000` / `code:"0"` | ✅ 成功（PC 京豆接口及购物返豆） |
+
+#### 固化产物
+- **签到脚本**：`projects/opencode-termux/scripts/jd/bean_sign.cjs`（多账号从 auth-login 账号池读 thor cookie，
+  krh5st 5.3 签名 → bff_rightsCenter_interaction；`--skip-time-check` 可无视时段强制跑，默认 10:00-21:00 才执行；
+  退出码：0=成功/2=时段外/3=全失败）。⚠️ 当前 assignmentId 可能失效（1714001），待动态获取新值。
+- **购物返豆领取脚本**：`projects/opencode-termux/scripts/jd/jd_collect_bean.cjs`（全免签名链路
+  manualCollectIndex → manualCollectBeans → 复查；2026-09-09 实测领 68 豆 ✅；`--account/--dry-run/--debug`）。
+- **评价领豆脚本**：`projects/opencode-termux/scripts/jd/jd_comment_bean.cjs`（全免签名链路
+  GET 待评价列表 → GET orderVoucher 提取 productId → POST saveProductComment；`--account/--dry-run/--debug`；
+  2026-09-09 实测 3/3 成功 + 明细「商品评价奖励京豆」到账 ✅）。
+- **插件每日调度（2026-09-09 接线）**：`providers/jd.mjs` `executeActivity` 新增
+  `daily_collect_bean`（→ jd_collect_bean.cjs）/ `daily_comment_bean`（→ jd_comment_bean.cjs）分支，
+  用 `spawnSync("node", ...)` 且 **清 LD_PRELOAD/LD_LIBRARY_PATH**（termux tagfix 干扰 node）；
+  opencode.json `options.sites.jd.activities` 现为 3 项（京豆签到/购物返豆领取/评价领京豆），
+  auth-login 每日调度（10s 首跑 + 30min interval）自动执行。独立验证脚本：`tmp/opencode/jd_test_plugin_branch.mjs`。
+- **自动执行器**：`scripts/jd/jd_bean_sign_runner.sh`（循环等 10:00 后执行一次即退出，日志 `bean_sign.log`；
+  `nohup bash jd_bean_sign_runner.sh &` 启动）。
+- 运行依赖：jdpro 仓库 `tmp/opencode/jd-h5st/jdpro/function/`（krh5st + node_modules/ds + redis）。
+
+#### 抓包方法（jdpro 脚本调试验证用）
+- **安全 patch**（`tmp/opencode/jd-h5st/jdpro/patch_safe2.cjs`）：只读 got 的 `opts.body/json/form/headers` +
+  hook response（含 zlib gunzip），**绝不覆盖 req.write/req.end**——旧 patch 覆盖 write/end 会让
+  jd_signbeanact_.js 在发请求前崩 `Cannot read properties of undefined (reading 'includes')`（已定位是
+  patch 干扰 got 的锅，非脚本自身 bug；不带 patch 时脚本能正常发包返回 1711002）。
+- 抓包过滤：api.m.jd.com / isvObfuscator / bff_。
