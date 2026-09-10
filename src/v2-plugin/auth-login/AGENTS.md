@@ -512,6 +512,20 @@ H5 `bff_rightsCenter_interaction` 的 assignmentId 换期无法内置，但 **PC
   且多次测试会堆积 20+ 残留 session 拖垮 chromedriver（DELETE 卡住），reset 方式：kill chromedriver 进程
   后重启（残留 session 无法可靠清理）。页面内 execute/sync 在该页不稳（返回 null），改用
   CDP `Runtime.evaluate`（`/goog/cdp/execute` + returnByValue:true）才稳定。
+  ⚠️ **★ thor 过期静默漏跑坑（2026-09-10 实测，已修复 commit cd442fe）**：
+  thor cookie 寿命约 **10.5h**，每日调度 07:13 执行时若 thor 已过期（09-09 09:55 保存→当晚 20:25 过期，
+  09-10 全天任务全失败）：
+  - 旧逻辑假阳性：bean_sign/collect 正确报失败，但 comment/photo 把「未登录页」解析成「无待评价/无待晒单」
+    → ok=true；且 ensureDaily **无条件写当日 done 标记** → 全天不再重试 = **静默漏跑**。
+  - 修复三层：① jd.mjs runScript 前置 cookie 预检（`BEAN_BALANCE` code=0000 判定；失效直接返回
+    ok=false「cookie 已失效需重新登录+任务名」，不进脚本）。② core.mjs runActivities 成功判定改用
+    返回对象 `ok` 字段（旧 `!!r` 恒真，吞掉业务失败）。③ ensureDaily：账户存在失败/异常时**不写当日
+    done 标记**，30min 后调度自动重试（实测 fail→retry:true→done 未写；force 语义不变）。
+  - **排查口诀**：哪天任务没跑→先查 `storage/jd/daily-meta.json` 是否被误标 done → 再直测
+    `BEAN_BALANCE` 看 code（0000=有效 / 4000 not login=失效）→ thor 失效只能重新扫码/注入新 cookie。
+  - 探测接口实测：`api.m.jd.com/api?functionId=BEAN_BALANCE&appid=asset-h5&client=pc` 带失效 cookie
+    返回 `{"msg":"not login","code":"4000"}`；`passport.jd.com/user/petName/getUserInfoForMiniJd.action`
+    失效时返回 200 + `null({})`；`passport.jd.com/uc/petName` 失效返回 HTML 首页（判据 code=0000 最可靠）。
 - **自动执行器**：`scripts/jd/jd_bean_sign_runner.sh`（循环等 10:00 后执行一次即退出，日志 `bean_sign.log`；
   `nohup bash jd_bean_sign_runner.sh &` 启动）。
 - 运行依赖：jdpro 仓库 `tmp/opencode/jd-h5st/jdpro/function/`（krh5st + node_modules/ds + redis）。
