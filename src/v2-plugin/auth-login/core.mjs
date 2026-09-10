@@ -259,6 +259,21 @@ export async function ensureDaily(site, opts = {}) {
     }
     const run = await runActivities(site, defs, { account: a });
     const results = run.accounts?.[0]?.results || [];
+    // 有任一活动失败或执行异常（超时/报错）→ 不标记当日完成，30min 后调度自动重试该账户；
+    // 只有全部活动成功（含"今日已签到/无单可做"等幂等成功）才记账。
+    const okAll = results.length > 0 && results.every((r) => r && r.ok);
+    if (!okAll) {
+      summary.executed.push({
+        account: a,
+        results,
+        retry: true,
+        reason:
+          results.length === 0
+            ? "活动执行异常（无结果），未标记当日完成，稍后自动重试"
+            : "存在失败活动，未标记当日完成，稍后自动重试",
+      });
+      continue;
+    }
     meta.perAccount[a] = date;
     meta.lastRun = Date.now();
     summary.executed.push({ account: a, results });
@@ -497,7 +512,9 @@ export async function runActivities(site, activityDefs = [], opts = {}) {
           Promise.resolve().then(call),
           new Promise((_, rej) => setTimeout(() => rej(new Error("活动执行超时（20s）")), 20000)),
         ]);
-        item.ok = !!r;
+        // 成功判定：executeActivity 返回对象带 ok 字段时以它为准（provider 可返回 {ok:false}
+        // 表示"执行了但业务失败"，如 jd cookie 失效拦截）；无 ok 字段才退回"有返回即成功"。
+        item.ok = r && typeof r === "object" && "ok" in r ? !!r.ok : !!r;
         item.data = r;
         item.message = r?.message || (r ? "ok" : "无响应");
       } catch (e) {

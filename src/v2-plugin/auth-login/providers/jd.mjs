@@ -312,6 +312,20 @@ export default {
 
   // 运行已固化的京东任务脚本（node 子进程；清 LD_PRELOAD/LD_LIBRARY_PATH 避免 termux tagfix 干扰）
   async runScript(s, name) {
+    // cookie 有效性预检：thor 寿命约 10.5h，失效时脚本会把未登录页误判为「无待评价/无待晒单」（假阳性）。
+    // 用 BEAN_BALANCE 判定：已登录 code="0000"；未登录 code="4000" msg="not login"（2026-09-10 实测）。
+    const probeRes = await fetch(
+      "https://api.m.jd.com/api?functionId=BEAN_BALANCE&appid=asset-h5&client=pc",
+      { headers: jdHeaders({ Cookie: cookieString((s && s.cookies) || {}), Referer: "https://bean.jd.com/myJingBean/list" }) }
+    );
+    const probeBody = tryJson(await probeRes.text());
+    if (!probeBody || probeBody.code !== "0000") {
+      return {
+        status: 3,
+        ok: false,
+        message: `⚠️ 京东 cookie 已失效（${(probeBody && probeBody.msg) || "not login"}）。任务「${name}」跳过，需重新扫码/注入新 thor 后再执行。`,
+      };
+    }
     const { spawnSync } = await import("node:child_process");
     const script = "/data/data/com.termux/files/home/.config/opencode/projects/opencode-termux/scripts/jd/" + name;
     const username = (s && s.user && s.user.username) || "loon520";
