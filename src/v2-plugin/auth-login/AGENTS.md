@@ -312,6 +312,30 @@
   多设备/自动化环境频繁登录）。**解除途径只有一条：用京东 APP 登录该账号完成安全验证**（网页端
   无任何绕过手段）。验证解除后再试 PC 扫码。aq.jd.com 页面仅含隐藏 eid/fp 两个 input + 提示文案，
   无滑块/短信通道可走。
+- ⚠️ **扫码链路全链路诊断实证（2026-09-10，推翻「二维码过期/扫码慢」的一切怀疑）**：
+  底层诊断脚本（独立 node 直接 fetch `qr.m.jd.com/check` + 调 doLogin，打印原始 code）完整记录：
+  `code=201(未扫) → 202(扫码成功「请手机客户端确认登录」) → 200(ticket, 确认成功) → doLogin`
+  **→ 每次都被 `riskCode:1100` 拦截**（跳 aq.jd.com，p=6e758c4f2920ca0d 与 09-09 记录一致）。
+  **铁律：手机弹「确认登录」框 ≠ 登录成功**——扫码/确认只到拿到 ticket 为止，最后一步换 token
+  仍被账号级风控拦截。**状态显示「二维码已过期」是假象**：doLogin 失败（1100）时 core.startPolling
+  的 ERROR 分支只记 lastError 不停止轮询，轮询继续刷到 130s 超时被 EXPIRED 覆盖 lastError——
+  排查 1100 类失败**必须用底层诊断脚本打印原始响应**，不能看 status 工具（4 次扫码全部误判为「过期」）。
+  **后续动作**：① 用户 09-10 三次扫码全被 1100（含 2026-09-09 APP 解验后仍如此）→ **该账号 PC 扫码
+  永久不可行，只能 manual_token 注入真实浏览器 cookie**；② jd.mjs pollStatus 增加「doLogin 失败立即
+  终止轮询」（commit 见下），避免 1100 下反复换 token ~60 次加重风控。
+- ★★ **「非浏览器特征导致 1100」假说被 chromium 完整浏览器栈实测推翻（2026-09-10 决定性对照实验）**：
+  用户质疑「1100 是保留了非浏览器特征」，遂用 **chromium（--headless=new + --disable-blink-features=
+  AutomationControlled，`navigator.webdriver=false`）完整加载 `passport.jd.com/new/login.aspx` 登录页**，
+  由**页面 img 自己生成的二维码 + 页面 JS 自己跑 扫码→轮询→ticket→换 thor 全流程**（非 node fetch 模拟），
+  脚本只落盘页面二维码 PNG（`tmp/opencode/jd_chromium_qr.cjs`）供用户扫码 + 轮询 `document.cookie`。
+  用户扫码确认后 **~20s 页面 URL 跳转 `aq.jd.com/certified/index?p=6e758c4f2920ca0d&...&e=YYVXFRED...`**
+  ——**真实浏览器引擎 + 真实页面 JS + 完整浏览器 TLS/指纹栈，同样被 1100**，风控参数 p 与前 6 次一字不差。
+  → **结论升级：1100 与请求特征（UA/头/指纹/是否 headless）完全无关，纯账号级**（p 参数稳定 = 账号
+  被打同一安全标记）。「非浏览器特征」假说**证伪**，AGENTS「只认账号」结论由 chromium 全浏览器栈再次铁证；
+  唯一解除途径仍是**京东 APP 登录该账号完成安全验证**（网页端无通道），验证后**必须用真实浏览器
+  （非扫码流程）访问 www.jd.com 拿到新鲜 thor**（2026-09-09 已走通）再 manual_token 注入。
+- **二维码本地兜底超时（2026-09-10 改 130s）**：原 `100s` 太紧（展示→扫码→手机确认易超时），
+  放宽到 `130s`（仍小于服务端 ~2min，安全）。**注意：该改动与 1100 无关**，1100 在 ticket 之后，秒回。
 - ✅ **风控解除 + 新鲜 thor 落库（2026-09-09 端到端确认）**：用户在【京东商城 APP】完成安全验证后，
   用真实浏览器（Windows Edge, 远程 IP 222.212.211.66）访问 www.jd.com 成功——请求头 cookie 含
   **完整新鲜 thor 登录态**（thor 288 字符 + pin=loon520 + unick=Kimcrowing + flash/light_key/pinId/

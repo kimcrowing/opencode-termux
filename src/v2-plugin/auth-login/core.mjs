@@ -415,6 +415,8 @@ function startPolling(site, s) {
         stopPolling(s);
       } else if (r.state === SITE_STATE.ERROR) {
         s.lastError = r.message || "轮询出错";
+        // fatal：确定性登录失败（如京东风控 1100），继续轮询只会反复换 token 刷请求加重风控
+        if (r.fatal) stopPolling(s);
       }
     } catch (e) {
       s.lastError = `轮询异常: ${e.message}`;

@@ -150,7 +150,9 @@ export default {
     const token = ck.wlfstk_smdl;
     if (!token) return { state: SITE_STATE.ERROR, message: "缺少 wlfstk_smdl（请重新生成二维码）" };
 
-    if (s._qrT0 && Date.now() - s._qrT0 > 100000) {
+    // 二维码本地兜底有效期：服务端约 2 分钟，本地 100s 太紧（用户展示→扫码→手机确认易超时，
+    // 2026-09-10 实测连失两次），放宽到 130s（仍小于服务端上限，安全）。
+    if (s._qrT0 && Date.now() - s._qrT0 > 130000) {
       return { state: SITE_STATE.EXPIRED };
     }
 
@@ -175,7 +177,11 @@ export default {
     if (code === 201) return { state: SITE_STATE.WAITING };
     if (code === 202) return { state: SITE_STATE.SCANNED };
     if (code === 200 && j.ticket) {
-      return await this.doLogin(String(j.ticket), s);
+      const dl = await this.doLogin(String(j.ticket), s);
+      // doLogin 失败（如 1100 风控）是确定性登录失败：标记 fatal 让 startPolling 立即终止轮询，
+      // 避免继续拿新 ticket 反复换 token（2026-09-10 实测一轮刷 ~60 次，加重风控）。
+      if (dl.state !== SITE_STATE.CONFIRMED) dl.fatal = true;
+      return dl;
     }
     if (code === 203) return { state: SITE_STATE.EXPIRED };
     return { state: SITE_STATE.ERROR, message: `扫码状态异常 code=${code}: ${j.msg || ""}` };
