@@ -176,7 +176,11 @@ const TOOLS = {
       "FeatureCollection 入口方法（含布尔 CreateUniteFeature/CreateSubtractFeature/CreateIntersectFeature）、" +
       "Builder 基类协议（Commit/Destroy/Validate…）、布尔三通道（BooleanOption/三方法/BooleanBuilder）、" +
       "各 Builder 属性方法详表（Block/Cylinder/Cone/Sphere/Extrude/Revolve/CylinderGear 齿轮/Hole…）、全部枚举值、" +
-      "特征命名 SetName 与 bbox 测量、journal.run 使用规范与实测坑。所有签名经 2606.3002 反射 dump 取证。",
+      "特征命名 SetName 与 bbox 测量、journal.run 使用规范与实测坑。所有签名经 2606.3002 反射 dump 取证。\n" +
+      "—— 【工具内固化 · 正确调用路径（2026-09-13 实测盖章）】本插件以 MCP server 形态接入时：" +
+      "namespace 是连字符 `nx-bridge`（不是下划线 `nx_bridge`）；SDK/CLI 侧调用走 `tools[\"nx-bridge\"][\"工具名\"]` 字典路径，" +
+      "execute（Code Mode）里同理 `tools[\"nx-bridge\"][\"server_ping\"]`（连字符命名空间 + 连字符工具名 server_ping），" +
+      "不要用下划线扁平名 `nx_bridge_server_ping`。19 工具全名单与 journal_run 的 {code} 单参、api_reference 自证法见文档 §0。",
     params: {},
     run: () => {
       const p = new URL("./NX2606-build-apis.md", import.meta.url);

@@ -6,6 +6,41 @@
 
 ---
 
+## 0. 正确调用方法（固化，2026-09-13 实测盖章）
+
+> **本段是本插件 19 工具的「正确调用清单」，所有会话一律照此调用，勿再走下划线/扁平名。**
+
+### 0.1 命名空间与路径（execute/Code Mode 里）
+
+- 插件注册为 MCP server，**名字空间是连字符 `nx-bridge`**（opencode.json `mcp.servers.nx-bridge`）。
+- execute（Code Mode）内调用**必须用字典路径**，**不要**用下划线扁平名 `nx_bridge_*` / `nx_bridge_server_ping`：
+
+```js
+// ✅ 正确
+await tools["nx-bridge"]["server_ping"]({});
+await tools["nx-bridge"]["part_work"]({});
+await tools["nx-bridge"]["journal_run"]({ code: "…NXOpen C# 语句…" });
+await tools["nx-bridge"]["api_reference"]({});   // 返回本文件全文（含本固化节）
+```
+
+- 工具名（19 个）都是**下划线**小写蛇形：`server_ping / session_info / session_undo / session_redo /
+  part_work / part_new_display / part_open / part_save / part_close_all / model_tree /
+  feature_block / feature_cylinder / feature_sphere / feature_suppress / feature_unsuppress /
+  measure_distance / ui_message / journal_run / api_reference`。
+- 命名空间键**是连字符**（`tools["nx-bridge"]`），不是下划线（`nx_bridge` 会报
+  `Cannot access ... on non-object`）；工具名里 journal_run 之外的都可直接按上式调用。
+
+### 0.2 三件日常必用
+
+1. **servack 健康检查**：`server_ping` → `{pong:true,nxVersion:"2606.3002"}`。
+2. **当前工作部件**：`part_work` → `{fullPath, name, modified}`。
+3. **复杂建模万能口 journal_run**：入参 `{code:"<NXOpen C# 语句序列>"}`，宿主已预置
+   `theSession / work / uf / sb` 与 `string RESULT`，把结果赋给 `RESULT` 即作为返回值；
+   编译/运行错误原样返回（宿主 SplitErrors 只读 stderr 的 bug 见 AGENTS.md §2，已用
+   `journal_run.sh` 闭环绕开）。写 journal 前先 `api_reference` 拿本文件全部签名。
+
+---
+
 ## 1. 入口集合与方法签名（work.Features = `NXOpen.Features.FeatureCollection`）
 
 ```csharp

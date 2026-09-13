@@ -32,7 +32,7 @@ journal.run 编译慢时可调大）。
 1. NX 2606 启动即自动加载 `NXUserDir\startup\NXRemoteServer.dll`；
 2. `netsh http add urlacl url=http://+:8123/ user=Everyone`（已做）+ 防火墙放行 8123（规则 NXBridge8123）。
 
-## 工具列表（19 个，namespace `nx_bridge` / `n`）
+## 工具列表（19 个，MCP 命名空间 `nx-bridge`（连字符）／execute 内调用 `tools["nx-bridge"]["工具名"]`）
 
 | 工具 | 作用 |
 |---|---|
