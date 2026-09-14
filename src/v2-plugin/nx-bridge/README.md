@@ -5,8 +5,11 @@
 
 - 链路：`opencode → MCP(stdin/stdout) → HTTP JSON-RPC(192.168.3.66:8123)` 桥接。
 - 后端：NX 进程内常驻 `NXRemoteServer.dll`（startup 自动加载，双通道 HttpListener:8123 +
-  .NET Remoting:8124，共用 `NxHost.Dispatch`，无鉴权）。源文件在 Windows 桌面
-  `C:\Users\Kim\NXRemoteServer.cs` + `build_remote.cmd`（csc v4.0.30319 编译）。
+  .NET Remoting:8124，共用 `NxHost.Dispatch`，无鉴权）。**部署单一事实源 = 仓库
+  `__dirname/host/` 三件套**：`NXRemoteServer.cs`（源）＋ `NXRemoteServer.dll`（**已在册**，
+  2026-09-14 用户决策：其它电脑 clone 仓库直接取 dll 放 startup 即自动加载，无需本地 csc 重编）＋
+  `build_remote.cmd`（csc v4.0.30319 编译命令，需要重编时用）。源头在 Windows 桌面
+  `C:\Users\Kim\NXRemoteServer.cs` + `build_remote.cmd`。
 - **真实渐开线齿形**：齿轮走 NX 自带 `CylinderGearBuilder`（GC 工具箱齿轮命令），完全由
   journal_run 一段代码生成，本插件不内置任何齿轮几何计算。
 
