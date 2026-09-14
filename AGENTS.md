@@ -142,3 +142,23 @@ v1 插件与 `~/.config/opencode/opencode.json` **冻结不改为底线**。
     `意见陈述书_2025-12-31.pdf` md5=`2b7c92519283748b0e043b3a438c4798` 与 110 `first_opinion_2024106091101.pdf` **完全一致**。
   - **参数使用示例已固化**：插件 `README.md`（标准工作流/参数模板/已知坑）+ server.ts 的 `list_documents`/`download_document` description（catalog 已生效）。
   - 调试手法：改完 core.mjs 用独立 node 进程 `env LD_PRELOAD=libtermux-exec-ld-preload.so XCP_DEBUG=1 node dbg_list.mjs` 验证（execute 内插件工具会话可能加载旧代码，结论以独立进程为准）。
+
+### 多页文档下载修复（2026-09-14，download_document 只取第 1 页的 bug）
+- **结论更正**：`download_document` 下载多页文档（扫描 PNG）时曾**只返回第一页**——根因是 `getDownloadUrl()` 只取 `ossLujingList[0]`，
+  而 CNIPA 的多页扫描件（如申请文件里的权利要求书）在 `fetch-file-infos` 返回的 `ossLujingList` 中**每页一个 OSS 路径**
+  （实测 202222916009X 原始权利要求书 = `.../104607160256/000001.PNG` + `.../000002.PNG` 两项）。
+  **仅 PNG 有多页问题；PDF 单文件即含全部页（ossLujingList 恒 1 项），不受影响。**
+  - 调试实证：`xcp_api.log`（`~/.cache/opencode/tmp/xcp_api.log`）里 `fetch-file-infos` 响应完整可见 `ossLujingList` 各项；
+    之前下载的单 PNG 恰好是第 1 页（112400B），第 2 页（68502B）被静默丢弃。
+- **修复（core.mjs，实测生效）**：
+  - `getDownloadUrl()` → `getDownloadUrls()` 返回全部 OSS 签名 URL；
+  - `downloadDocument()` 逐页下载全部，任一一页失败整体重试（WAF 抖动整组失败）→ `pages.length>1` 且全为 PNG 时 `mergePngPages()` 纵向拼接为一张图返回（2480×7016 实测）；
+  - 新增纯 Node 内置实现（无第三方依赖）：`decodePngAny`（支持 1/2/4/8 位深、colorType 0/2/3/4/6、非交织；**CNIPA 扫描件常见 bit 1 colorType 0**，旧 decodePng 只支持 8-bit 不可用）+ `encodePng8` + `crc32`（含 zlib.crc32 缺失时的表回退）+ `mergePngPages`（宽度不一致右端白底）。
+  - 新导出的验证入口：core.mjs export 增加 `decodePngAny/mergePngPages/encodePng8`。
+- **验证**：`node test_fixed_download.mjs`（独立进程直调 `downloadDocument`，`env -u LD_PRELOAD -u LD_LIBRARY_PATH` 起）返回 323100B PNG `qlqs_downloadDocument_fixed.png`（2480×7016），不再只返回第一页。
+- **一次性抢救脚本**：`plugins/xcpquery/download_all_pages.mjs <patent_no> <rid> <ds> <wenjiandm> <outPrefix>`（复用 session 缓存逐页落盘 `_01/_02...`；
+  补正书 100006 曾首试报 `fetch-file-infos 400 空 body`——是 WAF 抖动，加 XCP_DEBUG=1 重跑即成功，勿误判为文档不存在）。
+- **本案案巻实测参数（202222916009X，比亚迪）**：原始权利要求书 = `rid=104607160256, ds=SQWJ, wenjiandm=100001`（PNG 2 页）；
+  补正版权利要求书 = `rid=102025949180471, ds=ZJWJ, wenjiandm=100001`（PDF 2 页）；
+  补正书 = `rid=102025949572819, ds=ZJWJ, wenjiandm=100006`（PDF 1 页）；修改对照页 = `rid=102025948691041, ds=ZJWJ, wenjiandm=100042`（PDF 1 页）。
+  该案**通知书栏目无「第一次补正通知书」本体**（补正书引用的 2023-02-07 通知书未归档进公开查询），只有授予专利权通知书 + 费用减缴审批通知书——用户要补正通知书时只能交付补正书（申请人答复文件）并说明。

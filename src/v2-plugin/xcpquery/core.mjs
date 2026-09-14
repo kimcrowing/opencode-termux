@@ -87,6 +87,194 @@ function decodePng(buf) {
   return { width, height, data: out };
 }
 
+// ---------------- PNG 多页合并工具 ----------------
+// CNIPA 的多页文档（尤其申请文件里的扫描 PNG）在 fetch-file-infos 返回的
+// ossLujingList 中每页一个 OSS 路径（如 .../000001.PNG、.../000002.PNG），
+// 旧版 getDownloadUrl 只取 [0] 导致只下载第一页。这里提供：
+//   decodePngAny  通用解码（支持 1/2/4/8 位深、colorType 0/2/3/4/6、非交织）
+//   encodePng8    编码为 8-bit RGBA PNG
+//   mergePngPages 将多页 PNG 纵向拼接为一张图
+// 均只依赖 Node 内置模块（zlib），不引入第三方依赖。
+
+// 覆写 decodePng 曾支持的 8-bit 路径之外的位深：CNIPA 扫描件常见 bit 1 colorType 0。
+function decodePngAny(buf) {
+  if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf);
+  if (
+    buf.length < 8 ||
+    buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47
+  )
+    throw new Error("decodePngAny: not a PNG");
+  let off = 8;
+  let width = 0, height = 0, bitDepth = 0, colorType = 0, interlace = 0;
+  const idat = [];
+  const pal = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off); off += 4;
+    const type = buf.toString("ascii", off, off + 4); off += 4;
+    const data = buf.subarray(off, off + len); off += len;
+    off += 4; // skip CRC
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+      interlace = data[12];
+    } else if (type === "IDAT") {
+      idat.push(data);
+    } else if (type === "PLTE") {
+      for (let i = 0; i + 2 < data.length; i += 3) pal.push([data[i], data[i + 1], data[i + 2]]);
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+  if (!width || !height) throw new Error("decodePngAny: no IHDR");
+  if (interlace !== 0) throw new Error("decodePngAny: interlaced PNG unsupported");
+  if (bitDepth !== 1 && bitDepth !== 2 && bitDepth !== 4 && bitDepth !== 8)
+    throw new Error("decodePngAny: unsupported bitDepth " + bitDepth);
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colorType];
+  if (!channels) throw new Error("decodePngAny: unsupported colorType " + colorType);
+  if (colorType !== 0 && colorType !== 3 && bitDepth !== 8)
+    throw new Error("decodePngAny: colorType " + colorType + " requires 8-bit");
+
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  // PNG 滤波逐字节作用于每行 scanline；sub-byte 位深时也按字节滤波（bppBytes=1）。
+  const bppBytes = bitDepth < 8 ? 1 : channels;
+  const bitsPerPixel = bitDepth * channels;
+  const rowBytes = bitDepth < 8 ? Math.ceil((width * bitsPerPixel) / 8) : width * channels;
+
+  const out = new Uint8Array(width * height * 4);
+  out.fill(255); // 默认白底，避免调色板/alpha 缺失时变透明黑
+  const maxVal = (1 << bitDepth) - 1;
+  let pos = 0;
+  const prev = new Uint8Array(rowBytes);
+  for (let y = 0; y < height; y++) {
+    const ft = raw[pos++];
+    const cur = new Uint8Array(rowBytes);
+    for (let i = 0; i < rowBytes; i++) cur[i] = raw[pos++];
+    const recon = new Uint8Array(rowBytes);
+    for (let i = 0; i < rowBytes; i++) {
+      const a = i >= bppBytes ? recon[i - bppBytes] : 0;
+      const b = prev[i];
+      const c = i >= bppBytes ? prev[i - bppBytes] : 0;
+      let v;
+      switch (ft) {
+        case 0: v = cur[i]; break;
+        case 1: v = cur[i] + a; break;
+        case 2: v = cur[i] + b; break;
+        case 3: v = cur[i] + ((a + b) >> 1); break;
+        case 4: {
+          const p = a + b - c;
+          const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          v = cur[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+          break;
+        }
+        default: throw new Error("decodePngAny: bad filter " + ft);
+      }
+      recon[i] = v & 0xff;
+    }
+    // 逐像素提取 → RGBA
+    for (let x = 0; x < width; x++) {
+      const di = (y * width + x) * 4;
+      let r, g, b2, a2 = 255;
+      if (bitDepth < 8) {
+        const bitIdx = x * bitDepth;
+        const byteIdx = bitIdx >> 3;
+        const shift = 8 - bitDepth - (bitIdx & 7);
+        const v = (recon[byteIdx] >> shift) & maxVal;
+        if (colorType === 0) {
+          const gv = Math.round((v * 255) / maxVal);
+          r = g = b2 = gv;
+        } else { // colorType 3 调色板不会出现在 sub-byte（PLTE 恒 8-bit），防御
+          r = g = b2 = Math.round((v * 255) / maxVal);
+        }
+      } else if (colorType === 0) {
+        const v = recon[x];
+        r = g = b2 = v;
+      } else if (colorType === 2) {
+        r = recon[x * 3]; g = recon[x * 3 + 1]; b2 = recon[x * 3 + 2];
+      } else if (colorType === 3) {
+        const idx = recon[x];
+        const p = pal[idx] || [0, 0, 0];
+        r = p[0]; g = p[1]; b2 = p[2];
+      } else if (colorType === 4) {
+        const v = recon[x * 2]; a2 = recon[x * 2 + 1];
+        r = g = b2 = v;
+      } else {
+        r = recon[x * 4]; g = recon[x * 4 + 1]; b2 = recon[x * 4 + 2]; a2 = recon[x * 4 + 3];
+      }
+      out[di] = r; out[di + 1] = g; out[di + 2] = b2; out[di + 3] = a2;
+    }
+    prev.set(recon);
+  }
+  return { width, height, data: out };
+}
+
+let _crcTable = null;
+function crc32(buf) {
+  if (typeof zlib.crc32 === "function") return zlib.crc32(buf) >>> 0;
+  if (!_crcTable) {
+    _crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      _crcTable[n] = c >>> 0;
+    }
+  }
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = _crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const td = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(td), 0);
+  return Buffer.concat([len, td, crc]);
+}
+
+function encodePng8(width, height, rgba) {
+  const stride = width * 4;
+  const raw = Buffer.alloc(height * (stride + 1));
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0; // filter None
+    for (let x = 0; x < stride; x++) raw[y * (stride + 1) + 1 + x] = rgba[y * stride + x];
+  }
+  const idat = zlib.deflateSync(raw, { level: 9 });
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type RGBA
+  const chunks = [];
+  chunks.push(pngChunk("IHDR", ihdr));
+  chunks.push(pngChunk("IDAT", idat));
+  chunks.push(pngChunk("IEND", Buffer.alloc(0)));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ...chunks,
+  ]);
+}
+
+// 多页 PNG → 纵向拼接为一张图。宽度不一致时右端留白（默认白底）。
+function mergePngPages(buffers) {
+  const pages = buffers.map((b) => decodePngAny(b));
+  const width = Math.max(...pages.map((p) => p.width));
+  const height = pages.reduce((s, p) => s + p.height, 0);
+  const merged = new Uint8Array(width * height * 4);
+  merged.fill(255);
+  let yOff = 0;
+  for (const p of pages) {
+    for (let y = 0; y < p.height; y++) {
+      const src = p.data.subarray(y * p.width * 4, (y + 1) * p.width * 4);
+      merged.set(src, (yOff + y) * width * 4);
+    }
+    yOff += p.height;
+  }
+  return encodePng8(width, height, merged);
+}
+
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_FILE = path.join(__dir, ".session_cache.json");
 const WAF_RUNNER = path.join(__dir, "cjs", "waf_runner.js");
@@ -715,72 +903,82 @@ async function getDocumentFileInfo(patentNo, rid, ds, wenjiandm = "", isScjd = f
   }
   return (await cpqueryRequest("POST", FILE_INFO_ENDPOINT, body)).data || {};
 }
-function getDownloadUrl(fileInfo) {
-  if (!fileInfo || !fileInfo.ossLujingList) return "";
+function getDownloadUrls(fileInfo) {
+  if (!fileInfo || !fileInfo.ossLujingList || !fileInfo.ossLujingList.length) return [];
   const base = `${CPQUERY}/api/pcshoss/view/fetch-file`;
-  const oss = fileInfo.ossLujingList[0];
-  const m = String(oss.osslujing || "").match(/\.(\w+)$/);
-  const ext = m ? m[1].toLowerCase() : fileInfo.wenjianhzm || "pdf";
-  const params = new URLSearchParams({
-    osslujing: oss.osslujing,
-    wenjianhzm: ext,
-    timestamp: String(oss.timestamp),
-    sign: oss.sign,
-    isDN: oss.isDN ? "true" : "false",
-    ds: fileInfo.ds || "",
-    wenjiandm: fileInfo.wenjiandm || "",
+  return fileInfo.ossLujingList.map((oss) => {
+    const m = String(oss.osslujing || "").match(/\.(\w+)$/);
+    const ext = m ? m[1].toLowerCase() : fileInfo.wenjianhzm || "pdf";
+    const params = new URLSearchParams({
+      osslujing: oss.osslujing,
+      wenjianhzm: ext,
+      timestamp: String(oss.timestamp),
+      sign: oss.sign,
+      isDN: oss.isDN ? "true" : "false",
+      ds: fileInfo.ds || "",
+      wenjiandm: fileInfo.wenjiandm || "",
+    });
+    return `${base}?${params.toString()}`;
   });
-  return `${base}?${params.toString()}`;
 }
 async function downloadDocument(patentNo, rid, ds, wenjiandm = "", isScjd = false, anjianbh = "") {
   await ensureSession();
-  for (let attempt = 0; attempt < 5; attempt++) {
+  // 多页文档（扫描 PNG）在 ossLujingList 中每页一个 OSS 路径；
+  // PDF 通常只有一项（PDF 自身含多页）。这里固定取 3 次 file-info 尝试。
+  for (let attempt = 0; attempt < 3; attempt++) {
     const fi = await getDocumentFileInfo(patentNo, rid, ds, wenjiandm, isScjd, anjianbh);
-    const url = getDownloadUrl(fi);
-    if (!url) {
-      if (attempt < 4) {
+    const urls = getDownloadUrls(fi);
+    if (!urls.length) {
+      if (attempt < 2) {
         await sleep(3000);
         continue;
       }
       return Buffer.alloc(0);
     }
-    // Convert full cpquery URL to same-origin path (fetch-file is on cpquery domain).
-    const u = new URL(url);
-    const pathAndQuery = u.pathname + u.search;
-    const headers = { Accept: "*/*" };
-    if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
-    let res;
-    try {
-      res = await browserRequest("GET", pathAndQuery, { headers, binary: true });
-    } catch (e) {
-      if (attempt < 4) {
+    // 逐页下载；任一一页失败 → 整体重试（WAF 抖动多为整组失败）。
+    const pages = [];
+    let ok = true;
+    for (const url of urls) {
+      const u = new URL(url);
+      const pathAndQuery = u.pathname + u.search;
+      const headers = { Accept: "*/*" };
+      if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+      let res;
+      try {
+        res = await browserRequest("GET", pathAndQuery, { headers, binary: true });
+      } catch (e) {
+        ok = false;
+        break;
+      }
+      if (res.error) { ok = false; break; }
+      if (res.status === 412) { ok = false; break; }
+      if (res.status === 200 && res.body) {
+        pages.push(Buffer.from(res.body, "base64"));
+        continue;
+      }
+      ok = false;
+      break;
+    }
+    if (!ok) {
+      if (attempt < 2) {
         await sleep(3000);
         continue;
       }
-      throw e;
+      throw new Error("下载失败: 部分页下载未成功");
     }
-    if (res.error) {
-      if (attempt < 4) {
-        await sleep(3000);
-        continue;
+    if (!pages.length) return Buffer.alloc(0);
+    if (pages.length > 1) {
+      // 只有多页 PNG 需要合并（PDF 单文件即可用）；ossLujingList 多页即多页扫描件。
+      const allPng = pages.every((b) => b.length >= 4 && b.slice(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])));
+      if (allPng) {
+        try {
+          return mergePngPages(pages);
+        } catch (e) {
+          if (process.env.XCP_DEBUG) console.error("[xcp] 多页 PNG 合并失败，逐页返回第一页:", e.message);
+        }
       }
-      throw new Error("下载失败: " + res.error);
     }
-    if (res.status === 412) {
-      if (attempt < 4) {
-        await sleep(500);
-        continue;
-      }
-      throw new Error("下载失败: 412 anti-bot");
-    }
-    if (res.status === 200 && res.body) {
-      return Buffer.from(res.body, "base64");
-    }
-    if (attempt < 4) {
-      await sleep(3000);
-      continue;
-    }
-    throw new Error("下载失败: HTTP " + res.status);
+    return pages[0];
   }
 }
 async function getScjdTree(patentNo) {
@@ -1276,4 +1474,7 @@ export {
   cpqueryRequest,
   _isForeign,
   _toText,
+  decodePngAny,
+  mergePngPages,
+  encodePng8,
 };
