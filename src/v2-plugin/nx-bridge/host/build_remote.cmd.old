@@ -1,0 +1,24 @@
+@echo off
+set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+set MGD=D:\Program Files\Siemens\Designcenter2606\NXBIN\managed
+set FW=C:\Windows\Microsoft.NET\Framework64\v4.0.30319
+
+echo === Compile Server dll ===
+%CSC% /nologo /target:library /out:C:\Users\Kim\NXRemoteServer.dll ^
+ /r:"%MGD%\NXOpen.dll" ^
+ /r:"%MGD%\NXOpen.UF.dll" ^
+ /r:"%MGD%\NXOpen.Utilities.dll" ^
+ /r:"%MGD%\NXOpenUI.dll" ^
+ /r:"%FW%\System.Runtime.Remoting.dll" ^
+ /r:"%FW%\System.Windows.Forms.dll" ^
+ /r:System.dll /r:System.Core.dll ^
+ C:\Users\Kim\NXRemoteServer.cs 2>&1
+echo === SERVER_EXIT:%ERRORLEVEL% ===
+
+echo === Compile Client exe ===
+%CSC% /nologo /target:exe /out:C:\Users\Kim\RemoteClient.exe ^
+ /r:C:\Users\Kim\NXRemoteServer.dll ^
+ /r:"%FW%\System.Runtime.Remoting.dll" ^
+ /r:System.dll ^
+ C:\Users\Kim\RemoteClient.cs 2>&1
+echo === CLIENT_EXIT:%ERRORLEVEL% ===
