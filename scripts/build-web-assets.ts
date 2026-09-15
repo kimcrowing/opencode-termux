@@ -16,7 +16,7 @@
 // iterations (compress({})), letting build-opencode2 stay unchanged.
 import path from "path"
 import { mkdirSync } from "node:fs"
-import { Script } from "@opencode-ai/script"
+import { Script } from "@opencode/script"
 import { buildAppArchive } from "./app-assets"
 
 const skipWebUi = process.argv.includes("--skip-web-ui")

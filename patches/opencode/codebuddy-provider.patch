@@ -221,29 +221,30 @@ index 0000000..71c53a9
 +- config 扩展点：`packages/schema/config`（Document.info.providers）
 \ No newline at end of file
 diff --git a/packages/core/src/plugin/provider.ts b/packages/core/src/plugin/provider.ts
-index 18ef4e9..5ec257a 100644
+index 731bdab..cae34e6 100644
 --- a/packages/core/src/plugin/provider.ts
 +++ b/packages/core/src/plugin/provider.ts
-@@ -5,9 +5,11 @@ import { AzurePlugin } from "./provider/azure.js"
+@@ -4,10 +4,12 @@ import { AzurePlugin } from "./provider/azure.js"
  import { CerebrasPlugin } from "./provider/cerebras.js"
  import { CloudflareAIGatewayPlugin } from "./provider/cloudflare-ai-gateway.js"
  import { CloudflareWorkersAIPlugin } from "./provider/cloudflare-workers-ai.js"
 +import { CodeBuddyPlugin } from "./provider/codebuddy.js"
  import { CoherePlugin } from "./provider/cohere.js"
+ import { DigitalOceanPlugin } from "./provider/digitalocean.js"
  import { DynamicProviderPlugin } from "./provider/dynamic.js"
  import { GatewayPlugin } from "./provider/gateway.js"
 +import { GatewayConfigPlugin } from "./provider/gateway-config.js"
  import { GithubCopilotPlugin } from "./provider/github-copilot.js"
  import { GitLabPlugin } from "./provider/gitlab.js"
  import { GoogleVertexPlugin } from "./provider/google-vertex.js"
-@@ -40,8 +42,10 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
+@@ -39,9 +41,11 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
    CerebrasPlugin,
    CloudflareAIGatewayPlugin,
    CloudflareWorkersAIPlugin,
 +  CodeBuddyPlugin,
    CoherePlugin,
--  GatewayPlugin,
-+GatewayPlugin,
+   DigitalOceanPlugin,
+   GatewayPlugin,
 +  GatewayConfigPlugin,
    GithubCopilotPlugin,
    GitLabPlugin,
@@ -266,8 +267,8 @@ index 0000000..be2db13
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/gateway-config.ts
 @@ -0,0 +1,84 @@
-+import { define, type Context } from "@opencode-ai/plugin/effect/plugin"
-+import type { Entry } from "@opencode-ai/schema/config"
++import { define, type Context } from "@opencode/plugin/effect/plugin"
++import type { Entry } from "@opencode/schema/config"
 +import { Effect } from "effect"
 +import { Config } from "../../config.js"
 +import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
@@ -357,9 +358,9 @@ index 0000000..dad6d22
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/gateway/auth/device.ts
 @@ -0,0 +1,124 @@
-+import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
++import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 +import { Effect } from "effect"
-+import type { Form } from "@opencode-ai/schema/form"
++import type { Form } from "@opencode/schema/form"
 +import { Credential } from "../../../../credential.js"
 +import { Integration } from "../../../../integration.js"
 +import type { DeviceFlowSpec } from "../types.js"
@@ -488,7 +489,7 @@ index 0000000..8565685
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/gateway/auth/ioa.ts
 @@ -0,0 +1,192 @@
-+import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
++import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 +import { Effect } from "effect"
 +import { Credential } from "../../../../credential.js"
 +import { Integration } from "../../../../integration.js"
@@ -1288,7 +1289,7 @@ index 0000000..c19c879
 +import { Integration } from "../../../integration.js"
 +import { KV } from "../../../kv.js"
 +import { Model } from "../../../model.js"
-+import { define, type Context } from "@opencode-ai/plugin/effect/plugin"
++import { define, type Context } from "@opencode/plugin/effect/plugin"
 +import { Provider } from "../../../provider.js"
 +import type { InternalPlugin, Requirements } from "../../internal.js"
 +import { createGatewayFetch, type PipelineState } from "./pipeline.js"
@@ -1297,7 +1298,7 @@ index 0000000..c19c879
 +import { ioaOAuth } from "./auth/ioa.js"
 +import type { AuthDescriptor, GatewayProviderDescriptor } from "./types.js"
 +
-+import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
++import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 +
 +function buildRegistration(
 +  d: GatewayProviderDescriptor,
@@ -1613,9 +1614,9 @@ index 0000000..521c1a3
 --- /dev/null
 +++ b/packages/core/src/plugin/provider/gateway/types.ts
 @@ -0,0 +1,178 @@
-+import type { Form } from "@opencode-ai/schema/form"
-+import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
-+import type { SessionRequestKind } from "@opencode-ai/plugin/effect/session"
++import type { Form } from "@opencode/schema/form"
++import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
++import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 +import { Credential } from "../../../credential.js"
 +import { KV } from "../../../kv.js"
 +import { Model } from "../../../model.js"
@@ -2030,13 +2031,13 @@ index 368b5ea..3c5d0b4 100644
 --- a/packages/core/src/plugin/provider/github-copilot.ts
 +++ b/packages/core/src/plugin/provider/github-copilot.ts
 @@ -1,4 +1,3 @@
--import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/effect/integration"
- import type { SessionRequestKind } from "@opencode-ai/plugin/effect/session"
+-import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
+ import type { SessionRequestKind } from "@opencode/plugin/effect/session"
  import { Effect, Option, Schema, Semaphore, Stream } from "effect"
  import { Catalog } from "../../catalog.js"
 @@ -10,149 +9,84 @@ import { Integration } from "../../integration.js"
  import { Model } from "../../model.js"
- import { define } from "@opencode-ai/plugin/effect/plugin"
+ import { define } from "@opencode/plugin/effect/plugin"
  import { Provider } from "../../provider.js"
 +import { deviceOAuth } from "./gateway/auth/device.js"
 +import type { DeviceFlowSpec } from "./gateway/types.js"
@@ -2299,10 +2300,10 @@ index 368b5ea..3c5d0b4 100644
  
  export function copilotFetch(token: string | undefined, upstream: Fetch | undefined, app: App.Info): Fetch {
 diff --git a/packages/schema/src/config/provider.ts b/packages/schema/src/config/provider.ts
-index c90482e..13679d9 100644
+index 3f0bdea..ffec0d5 100644
 --- a/packages/schema/src/config/provider.ts
 +++ b/packages/schema/src/config/provider.ts
-@@ -57,11 +57,41 @@ class Model extends Schema.Class<Model>("Config.Model")({
+@@ -61,7 +61,36 @@ class Model extends Schema.Class<Model>("Config.Model")({
    limit: Limit.pipe(optional),
  }) {}
  
@@ -2336,7 +2337,10 @@ index c90482e..13679d9 100644
 +
  export class Info extends Schema.Class<Info>("Config.Provider")({
 +  type: Schema.Literal("gateway").pipe(optional),
-   canonical: Provider.ID.pipe(optional),
+   compaction: Provider.Compaction.pipe(optional),
+   websocket: Schema.Boolean.pipe(optional).annotate({
+     description: "Use the provider's WebSocket transport when the route supports it. Defaults to the built-in policy.",
+@@ -70,6 +99,7 @@ export class Info extends Schema.Class<Info>("Config.Provider")({
    name: Schema.String.pipe(optional),
    env: Schema.String.pipe(Schema.Array, optional),
    package: Schema.String.pipe(optional),

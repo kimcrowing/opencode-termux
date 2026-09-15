@@ -44,7 +44,7 @@ const sourcemaps = process.argv.includes("--sourcemaps")
 const dir = process.env.OPENCODE_PKG_DIR ?? path.resolve(import.meta.dirname, "..")
 process.chdir(dir)
 
-const { Script } = await import("@opencode-ai/script")
+const { Script } = await import("@opencode/script")
 
 const name = "opencode2-linux-aarch64-android"
 const binary = "opencode2"
@@ -178,7 +178,7 @@ await Bun.write(
   path.join("dist", name, "package.json"),
   JSON.stringify(
     {
-      name: `@opencode-ai/${name}`,
+      name: `@opencode/${name}`,
       version: Script.version,
       license: "MIT",
       repository: { type: "git", url: "git+https://github.com/anomalyco/opencode.git" },
