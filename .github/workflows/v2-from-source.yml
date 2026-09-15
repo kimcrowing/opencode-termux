@@ -617,14 +617,14 @@ jobs:
           set -euo pipefail
           cd build/opencode-src/packages/cli
           bun run script/build.ts \
-            --target=opencode2-linux-x64 \
+            --target=opencode-linux-x64 \
             --skip-web-ui \
             --skip-install
 
       - name: Run v2 plugin verification
         run: |
           set -euo pipefail
-          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode"
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; ls -R "$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist" || true; exit 1; }
           chmod +x tests/v2-plugin/verify.sh
           ./tests/v2-plugin/verify.sh "$BIN"
@@ -632,7 +632,7 @@ jobs:
       - name: Run uyanip v2 migration verification
         run: |
           set -euo pipefail
-          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode"
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
           chmod +x tests/v2-plugin/verify-uyanip.sh
           ./tests/v2-plugin/verify-uyanip.sh "$BIN"
@@ -640,7 +640,7 @@ jobs:
       - name: Run xcpquery v2 migration verification
         run: |
           set -euo pipefail
-          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode"
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
           chmod +x tests/v2-plugin/verify-xcpquery.sh
           ./tests/v2-plugin/verify-xcpquery.sh "$BIN"
@@ -648,7 +648,7 @@ jobs:
       - name: Run dingtalk v2 migration verification
         run: |
           set -euo pipefail
-          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode"
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
           chmod +x tests/v2-plugin/verify-dingtalk.sh
           ./tests/v2-plugin/verify-dingtalk.sh "$BIN"
@@ -656,7 +656,7 @@ jobs:
       - name: Run auth-login v2 plugin verification
         run: |
           set -euo pipefail
-          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode2"
+          BIN="$GITHUB_WORKSPACE/build/opencode-src/packages/cli/dist/cli-linux-x64/bin/opencode"
           test -x "$BIN" || { echo "::error::linux binary missing: $BIN"; exit 1; }
           chmod +x tests/v2-plugin/verify-auth-login.sh
           ./tests/v2-plugin/verify-auth-login.sh "$BIN"
