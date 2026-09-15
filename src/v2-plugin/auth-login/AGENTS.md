@@ -251,6 +251,13 @@
 - **礼包（www.codebuddy.cn，Bearer + X-Domain + X-User-Id(uid=JWT sub)）**：
   `POST /billing/meter/claim-gift` → `{code:10001,"每人限领一次…"}` = 已领（幂等，provider 按 ok 处理）；
   `GET /billing/meter/check-gift-claimed` 实测 404 不存在，勿用。
+  ⚠️ **★ 幂等判失败 bug（2026-09-15 修复，commit 待记）**：claim-gift 已领过时服务端返回 **HTTP 400**
+  （`res.ok=false`）+ `code:10001`。旧判定 `ok: res.ok && (code===0 || already)` 把「已领取」的
+  `already=true` 场景打成 **ok=false** → core `ensureDaily` 的 okAll=false → **当日 done 永不落账，
+  每 30min 无限重试**（症状：meta 停在 09-10 07:13、svlog 每周期成对出现 `daily codebuddy`、账户文件
+  savedAt 却在持续更新 = refresh 正常、活动执行也正常只是判定错）。修复为 `ok: (code===0 && res.ok) || already`。
+  **教训**：所有「服务端用 4xx + 业务码表达幂等成功」的活动（已领/已签到/已抽过）必须显式把该码判为
+  ok=true，参照 gitcode sign_in 的「今日已签到」幂等处理；确保 daily 能记账才不空转重试。
 
 ### credential 同步（credential-sync.mjs + provider.syncCredentialSafe）
 - **双库写入**：`~/.local/share/opencode/opencode.db` 与 `opencode-.db` 都写（dbPaths() 探测既存库）；

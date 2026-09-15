@@ -443,9 +443,12 @@ export default {
     const body = parseBody(await res.text());
     const code = body && body.code;
     const already = code === 10001;
+    // ★ 2026-09-15 修复：already（已领过）时服务端返回 HTTP 400（res.ok=false），
+    //   旧逻辑 `res.ok && (code === 0 || already)` 把幂等成功判成失败 → ensureDaily 永不记账、
+    //   每 30min 无限重试（meta 停在 09-10）。幂等已领 = ok。
     return {
       status: res.status,
-      ok: res.ok && (code === 0 || already),
+      ok: (code === 0 && res.ok) || already,
       message: already ? "新手礼包已领取过（幂等）" : body ? `${body.msg || "ok"}` : "无响应",
       code,
       body,
