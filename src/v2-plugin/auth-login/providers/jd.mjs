@@ -43,7 +43,7 @@
 //   登录态 = cookie 字典（非 token），持久化到 s.cookies，
 //   京东无官方 token 刷新机制 → 不实现 refresh()，cookie 失效靠重新扫码(update) 续期。
 
-import { SITE_STATE } from "../core.mjs";
+import { SITE_STATE, markSuspend } from "../core.mjs";
 
 const LOGIN_PAGE = "https://passport.jd.com/new/login.aspx";
 const QR_SHOW = "https://qr.m.jd.com/show";
@@ -51,6 +51,11 @@ const QR_CHECK = "https://qr.m.jd.com/check";
 const TICKET_VALIDATE = "https://passport.jd.com/uc/qrCodeTicketValidation";
 const PET_NAME = "https://passport.jd.com/user/petName/getUserInfoForMiniJd.action";
 const WQ_USER_INFO = "https://wq.jd.com/user/info/QueryJDUserInfo?sceneval=2";
+
+// cookie 失效暂停重试时长：thor 寿命约 10.5h，失效后暂停 12h 自动重试
+// （每日调度 30min 一次 → 暂停后约每天探活 1~2 次，不再对死登录态空转打接口）；
+// 新登录态落盘（manual_token 注入/扫码确认）时 core.persistSession 自动清除暂停。
+const SUSPEND_MS = 12 * 3600 * 1000; // 12h
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -318,6 +323,7 @@ export default {
 
   // 运行已固化的京东任务脚本（node 子进程；清 LD_PRELOAD/LD_LIBRARY_PATH 避免 termux tagfix 干扰）
   async runScript(s, name) {
+    const username = (s && s.user && s.user.username) || "loon520";
     // cookie 有效性预检：thor 寿命约 10.5h，失效时脚本会把未登录页误判为「无待评价/无待晒单」（假阳性）。
     // 用 BEAN_BALANCE 判定：已登录 code="0000"；未登录 code="4000" msg="not login"（2026-09-10 实测）。
     const probeRes = await fetch(
@@ -325,7 +331,20 @@ export default {
       { headers: jdHeaders({ Cookie: cookieString((s && s.cookies) || {}), Referer: "https://bean.jd.com/myJingBean/list" }) }
     );
     const probeBody = tryJson(await probeRes.text());
+    // 仅「确定性未登录」才暂停自动重试（code==="4000" 是服务端明确 not login，2026-09-10 实测）；
+    // 网络瞬断（probeBody 为 null / fetch 超时）不标暂停——那只是偶发，仍按原重试节奏走。
+    if (probeBody && probeBody.code === "4000") {
+      const suspUser = ((s && s.user && s.user.username) || "loon520");
+      try {
+        markSuspend("jd", suspUser, "京东 thor cookie 已失效（BEAN_BALANCE 返回 not login）", SUSPEND_MS);
+      } catch {}
+    }
     if (!probeBody || probeBody.code !== "0000") {
+      // cookie 确定性失效 → 暂停该账户自动重试 12h（避免 30min 调度每轮对死 cookie 打探活接口）。
+      // 新登录态落盘（manual_token 注入/扫码确认）时 persistSession 自动 clearSuspend 恢复。
+      try {
+        markSuspend("jd", username, "京东 thor cookie 已失效（需注入新登录态）", SUSPEND_MS);
+      } catch {}
       return {
         status: 3,
         ok: false,
@@ -334,7 +353,6 @@ export default {
     }
     const { spawnSync } = await import("node:child_process");
     const script = "/data/data/com.termux/files/home/.config/opencode/projects/opencode-termux/scripts/jd/" + name;
-    const username = (s && s.user && s.user.username) || "loon520";
     const env = Object.assign({}, process.env);
     delete env.LD_PRELOAD;
     delete env.LD_LIBRARY_PATH;

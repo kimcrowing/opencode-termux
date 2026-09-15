@@ -540,6 +540,17 @@ H5 `bff_rightsCenter_interaction` 的 assignmentId 换期无法内置，但 **PC
 - 页面 JS 出处：`storage.360buyimg.com/channel2022/jd_bean_sign/index-legacy-BldL61M_.js`
   （京豆中心主框架 `assets-fe/mybean/prod/.../index.*.js` 按需加载该频道 chunk）。
 
+- **jd cookie 失效节流（suspend 暂停重试，2026-09-15/16 新增）**：京东 thor cookie 寿命约 10.5h → 每日调度
+  每 30min 对死登录态打探活/活动接口会**空转重试 5 天**（与 codebuddy 09-10 幂等 bug 同类症状，也加重风控信号）。
+  - 机制 = core.mjs 通用「暂停重试（suspend）」：`markSuspend(siteId, account, reason, ms)` 写
+    `storage/<site>/suspend.json` → 冷却期内 `ensureDaily`（非 force）直接 skip 该账户，**不再打任何网络请求**；
+    `force:true` 绕过；过期自动解除（懒清理）；**任何新登录态落盘（persistSession/扫码确认/手动注入）自动
+    clearSuspend 恢复**——新 thor 到手立即恢复，不误伤正常注入。
+  - jd.mjs 接线：`runScript` cookie 预检（BEAN_BALANCE code!=="0000"）确定性失败 → `markSuspend("jd", username,
+    "京东 thor cookie 已失效…", 12h)`（与 thor ~10.5h 寿命相当）；`SUSPEND_MS = 12h`。
+  - 单测 `tmp/opencode/suspend_test.mjs`（24 断言全 PASS）：mark/clear/active 语义 + persistSession 自动清除 +
+    过期自动失效 + ensureDaily 冷却中 skip/force 绕过/清除后恢复。
+
 #### 错误码对照（实测，2026-09-09 更新）
 | 返回 | 含义 |
 |---|---|

@@ -181,6 +181,8 @@ export function persistSession(siteId, accountId, s) {
     user: s.user,
     savedAt: s.savedAt,
   });
+  // 任意来源的登录态落盘 = 新登录态到手 → 自动解除「cookie 失效暂停重试」（如 jd 挂起的 suspend）。
+  clearSuspend(siteId, accountId || s?._accountId || "_default");
 }
 
 // ---------- 每日自动任务（每日一次/每账户幂等） ----------
@@ -215,6 +217,71 @@ function saveDailyMeta(siteId, meta) {
   }
 }
 
+// ---------- 暂停自动重试（suspend）机制 ----------
+// 用途：登录态确定性失效（如京东 thor cookie 过期/被风控）时由 provider 调用 markSuspend()，
+//       使每日调度对该账户在冷却期内直接跳过（不再每 30min 空转打接口/加重风控）；
+//       新登录态落到账号池（persistSession/manual_token/扫码确认）时自动 clearSuspend 恢复。
+// 状态文件：storage/<site>/suspend.json → { "<account>": { since, until, reason } }
+
+function suspendPath(siteId) {
+  return path.join(storageDir(siteId), "suspend.json");
+}
+
+function loadSuspend(siteId) {
+  try {
+    const p = suspendPath(siteId);
+    if (!fs.existsSync(p)) return {};
+    const d = JSON.parse(fs.readFileSync(p, "utf-8"));
+    return d && typeof d === "object" ? d : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSuspend(siteId, data) {
+  try {
+    fs.writeFileSync(suspendPath(siteId), JSON.stringify(data, null, 2), "utf-8");
+  } catch (e) {
+    console.error(`[auth-login] save suspend ${siteId} failed: ${e.message}`);
+  }
+}
+
+/** 标记某账户在 ms 毫秒内暂停自动重试（如 cookie 确定性失效）。返回暂停记录。 */
+export function markSuspend(siteId, account, reason, ms) {
+  const data = loadSuspend(siteId);
+  const key = String(account);
+  data[key] = { since: Date.now(), until: Date.now() + Math.max(0, Number(ms) || 0), reason: String(reason || "暂停重试") };
+  saveSuspend(siteId, data);
+  return { ...data[key] };
+}
+
+/** 清除某账户暂停（登录态更新/注入成功时由 persistSession 统一调用）。 */
+export function clearSuspend(siteId, account) {
+  const data = loadSuspend(siteId);
+  const key = String(account);
+  if (!(key in data)) return;
+  delete data[key];
+  if (Object.keys(data).length) {
+    saveSuspend(siteId, data);
+  } else {
+    try {
+      fs.unlinkSync(suspendPath(siteId));
+    } catch {}
+  }
+}
+
+/** 返回该账户当前有效暂停 { until, reason }，无/已过期返回 null（过期条目懒清理）。 */
+export function activeSuspend(siteId, account) {
+  const data = loadSuspend(siteId);
+  const rec = data[String(account)];
+  if (!rec || typeof rec.until !== "number") return null;
+  if (rec.until <= Date.now()) {
+    clearSuspend(siteId, account);
+    return null;
+  }
+  return { until: rec.until, reason: rec.reason };
+}
+
 /**
  * 【每日自动任务】对站点账号池执行配置的活动列表，每天每账户最多一次（幂等）。
  * 设计：serve 启动时调用一次 + 定时器每 ~30min 检查一次（日期变化即补跑），
@@ -247,6 +314,18 @@ export async function ensureDaily(site, opts = {}) {
     if (!s.token && !s.cookies) {
       summary.skipped.push({ account: a, reason: "未登录（先扫码添加/更新账户）" });
       continue;
+    }
+    // 暂停自动重试检查：登录态确定性失效（provider 已 markSuspend，如京东 thor 过期）
+    // 时跳过执行，避免 30min 调度对死登录态空转打接口/加重风控。force 忽略暂停。
+    if (!force) {
+      const susp = activeSuspend(siteId, a);
+      if (susp) {
+        summary.skipped.push({
+          account: a,
+          reason: `已暂停自动重试（${susp.reason}）；${new Date(susp.until).toLocaleString("zh-CN")} 后自动再探活，注入新登录态即恢复`,
+        });
+        continue;
+      }
     }
     // 执行前先尝试 refresh 滚动 token（适配器实现了 refresh() 时；如 GitCode 每日续期 24h）。
     // refresh 失败（refresh_token 失效）→ 该账户跳过，标记需扫码更新，避免用死 token 白打接口。
